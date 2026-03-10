@@ -5,6 +5,7 @@ import { Ghostty, Terminal as GhosttyTerminal, FitAddon } from 'ghostty-web';
 import { isMobileDeviceViaCSS } from '@/lib/device';
 import type { TerminalTheme } from '@/lib/terminalTheme';
 import { getGhosttyTerminalOptions } from '@/lib/terminalTheme';
+import { writeTextToClipboard } from '@/lib/desktop';
 import type { TerminalChunk } from '@/stores/useTerminalStore';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import { cn } from '@/lib/utils';
@@ -403,8 +404,38 @@ const TerminalViewport = React.forwardRef<TerminalController, TerminalViewportPr
         return;
       }
 
-      await copyTextToClipboard(text);
-    }, [getDomSelectionTextInViewport, getTerminalSelectionText]);
+      const container = containerRef.current;
+      if (!container) {
+        return;
+      }
+      const selection = window.getSelection();
+      const anchorNode = selection?.anchorNode;
+      const focusNode = selection?.focusNode;
+      if (anchorNode && !container.contains(anchorNode)) {
+        return;
+      }
+      if (focusNode && !container.contains(focusNode)) {
+        return;
+      }
+
+      if (await writeTextToClipboard(text)) {
+        return;
+      }
+
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      } catch {
+        return;
+      }
+    }, []);
 
     const hasCopyableSelectionInViewport = React.useCallback((): boolean => {
       const terminalSelection = getTerminalSelectionText();

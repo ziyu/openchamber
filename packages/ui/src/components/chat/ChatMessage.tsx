@@ -10,6 +10,7 @@ import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useContextStore } from '@/stores/contextStore';
 import { useDeviceInfo } from '@/lib/device';
+import { writeTextToClipboard } from '@/lib/desktop';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { generateSyntaxTheme } from '@/lib/theme/syntaxThemeGenerator';
 import { cn } from '@/lib/utils';
@@ -25,7 +26,6 @@ import { flattenAssistantTextParts } from '@/lib/messages/messageText';
 import { isLikelyProviderAuthFailure, PROVIDER_AUTH_FAILURE_MESSAGE } from '@/lib/messages/providerAuthError';
 import { FadeInOnReveal } from './message/FadeInOnReveal';
 import type { TurnGroupingContext } from './hooks/useTurnGrouping';
-import { copyTextToClipboard } from '@/lib/clipboard';
 
 const ToolOutputDialog = React.lazy(() => import('./message/ToolOutputDialog'));
 
@@ -636,8 +636,8 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
     }, [hasStartedStreamingHeader, isUser, previousRole, turnGroupingContext, streamPhase, message.info]);
 
     const handleCopyCode = React.useCallback((code: string) => {
-        void copyTextToClipboard(code).then((result) => {
-            if (!result.ok) {
+        void writeTextToClipboard(code).then((copied) => {
+            if (!copied) {
                 return;
             }
             setCopiedCode(code);
@@ -767,9 +767,17 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
 
     const hasTextContent = messageTextContent.length > 0;
 
+    const copyTextToClipboard = React.useCallback(async (text: string): Promise<boolean> => {
+        if (!text) {
+            return false;
+        }
+
+        return writeTextToClipboard(text);
+    }, []);
+
     const handleCopyMessage = React.useCallback(async () => {
-        const result = await copyTextToClipboard(messageTextContent);
-        if (!result.ok) {
+        const copied = await copyTextToClipboard(messageTextContent);
+        if (!copied) {
             return;
         }
         setCopiedMessage(true);

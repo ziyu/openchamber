@@ -2,9 +2,17 @@ import React from 'react';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { VSCodeLayout } from '@/components/layout/VSCodeLayout';
 import { AgentManagerView } from '@/components/views/agent-manager';
-import { ChatView } from '@/components/views';
 import { FireworksProvider } from '@/contexts/FireworksContext';
 import { Toaster } from '@/components/ui/sonner';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { MemoryDebugPanel } from '@/components/ui/MemoryDebugPanel';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { useEventStream } from '@/hooks/useEventStream';
@@ -13,20 +21,16 @@ import { useMenuActions } from '@/hooks/useMenuActions';
 import { useSessionStatusBootstrap } from '@/hooks/useSessionStatusBootstrap';
 import { useServerSessionStatus } from '@/hooks/useServerSessionStatus';
 import { useSessionAutoCleanup } from '@/hooks/useSessionAutoCleanup';
-import { useQueuedMessageAutoSend } from '@/hooks/useQueuedMessageAutoSend';
 import { useRouter } from '@/hooks/useRouter';
 import { usePushVisibilityBeacon } from '@/hooks/usePushVisibilityBeacon';
-import { usePwaManifestSync } from '@/hooks/usePwaManifestSync';
-import { usePwaInstallPrompt } from '@/hooks/usePwaInstallPrompt';
-import { useWindowTitle } from '@/hooks/useWindowTitle';
-import { useGitHubPrBackgroundTracking } from '@/hooks/useGitHubPrBackgroundTracking';
 import { GitPollingProvider } from '@/hooks/useGitPolling';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { hasModifier } from '@/lib/utils';
-import { isDesktopLocalOriginActive, isDesktopShell } from '@/lib/desktop';
+import { authenticateWithBiometrics, getBiometricStatus, isDesktopLocalOriginActive, isDesktopShell, isMobileRuntime, isNativeMobileApp, isTauriShell } from '@/lib/desktop';
 import { OnboardingScreen } from '@/components/onboarding/OnboardingScreen';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
+import { useInstancesStore } from '@/stores/useInstancesStore';
 import { opencodeClient } from '@/lib/opencode/client';
 import { useFontPreferences } from '@/hooks/useFontPreferences';
 import { CODE_FONT_OPTION_MAP, DEFAULT_MONO_FONT, DEFAULT_UI_FONT, UI_FONT_OPTION_MAP } from '@/lib/fontOptions';
@@ -39,10 +43,6 @@ import { useUIStore } from '@/stores/useUIStore';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import type { RuntimeAPIs } from '@/lib/api/types';
 import { TooltipProvider } from '@/components/ui/tooltip';
-
-const CLI_MISSING_ERROR_REGEX =
-  /ENOENT|spawn\s+opencode|Unable\s+to\s+locate\s+the\s+opencode\s+CLI|OpenCode\s+CLI\s+not\s+found|opencode(\.exe)?\s+not\s+found|opencode(\.exe)?:\s*command\s+not\s+found|not\s+recognized\s+as\s+an\s+internal\s+or\s+external\s+command|env:\s*['"]?(node|bun)['"]?:\s*No\s+such\s+file\s+or\s+directory|(node|bun):\s*No\s+such\s+file\s+or\s+directory/i;
-const CLI_ONBOARDING_HEALTH_POLL_MS = 1500;
 
 const AboutDialogWrapper: React.FC = () => {
   const { isAboutDialogOpen, setAboutDialogOpen } = useUIStore();
@@ -58,68 +58,37 @@ type AppProps = {
   apis: RuntimeAPIs;
 };
 
-type EmbeddedSessionChatConfig = {
-  sessionId: string;
-  directory: string | null;
-};
-
-type EmbeddedVisibilityPayload = {
-  visible?: unknown;
-};
-
-const readEmbeddedSessionChatConfig = (): EmbeddedSessionChatConfig | null => {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  const params = new URLSearchParams(window.location.search);
-  if (params.get('ocPanel') !== 'session-chat') {
-    return null;
-  }
-
-  const sessionIdRaw = params.get('sessionId');
-  const sessionId = typeof sessionIdRaw === 'string' ? sessionIdRaw.trim() : '';
-  if (!sessionId) {
-    return null;
-  }
-
-  const directoryRaw = params.get('directory');
-  const directory = typeof directoryRaw === 'string' && directoryRaw.trim().length > 0
-    ? directoryRaw.trim()
-    : null;
-
-  return {
-    sessionId,
-    directory,
-  };
-};
-
 function App({ apis }: AppProps) {
   const { initializeApp, isInitialized, isConnected } = useConfigStore();
-  const providersCount = useConfigStore((state) => state.providers.length);
-  const agentsCount = useConfigStore((state) => state.agents.length);
-  const loadProviders = useConfigStore((state) => state.loadProviders);
-  const loadAgents = useConfigStore((state) => state.loadAgents);
   const { error, clearError, loadSessions } = useSessionStore();
-  const currentSessionId = useSessionStore((state) => state.currentSessionId);
-  const setCurrentSession = useSessionStore((state) => state.setCurrentSession);
-  const sessions = useSessionStore((state) => state.sessions);
   const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
-  const setDirectory = useDirectoryStore((state) => state.setDirectory);
   const isSwitchingDirectory = useDirectoryStore((state) => state.isSwitchingDirectory);
   const [showMemoryDebug, setShowMemoryDebug] = React.useState(false);
+  const [connectionCheckCompleted, setConnectionCheckCompleted] = React.useState<boolean>(() => apis.runtime.isVSCode);
+  const [isRetryingConnection, setIsRetryingConnection] = React.useState(false);
   const { uiFont, monoFont } = useFontPreferences();
   const refreshGitHubAuthStatus = useGitHubAuthStore((state) => state.refreshStatus);
   const [isVSCodeRuntime, setIsVSCodeRuntime] = React.useState<boolean>(() => apis.runtime.isVSCode);
   const [showCliOnboarding, setShowCliOnboarding] = React.useState(false);
-  const [isEmbeddedVisible, setIsEmbeddedVisible] = React.useState(true);
+  const instances = useInstancesStore((state) => state.instances);
+  const currentInstanceId = useInstancesStore((state) => state.currentInstanceId);
+  const setCurrentInstance = useInstancesStore((state) => state.setCurrentInstance);
+  const touchInstance = useInstancesStore((state) => state.touchInstance);
+  const isDeviceLoginOpen = useUIStore((state) => state.isDeviceLoginOpen);
+  const setDeviceLoginOpen = useUIStore((state) => state.setDeviceLoginOpen);
+  const biometricLockEnabled = useUIStore((state) => state.biometricLockEnabled);
+  const setBiometricLockEnabled = useUIStore((state) => state.setBiometricLockEnabled);
   const appReadyDispatchedRef = React.useRef(false);
-  const embeddedSessionChat = React.useMemo<EmbeddedSessionChatConfig | null>(() => readEmbeddedSessionChatConfig(), []);
-  const embeddedBackgroundWorkEnabled = !embeddedSessionChat || isEmbeddedVisible;
+  const [biometricRequired, setBiometricRequired] = React.useState(false);
+  const [biometricBusy, setBiometricBusy] = React.useState(false);
 
   React.useEffect(() => {
     setIsVSCodeRuntime(apis.runtime.isVSCode);
   }, [apis.runtime.isVSCode]);
+
+  React.useEffect(() => {
+    setConnectionCheckCompleted(isVSCodeRuntime);
+  }, [isVSCodeRuntime]);
 
   React.useEffect(() => {
     registerRuntimeAPIs(apis);
@@ -127,14 +96,8 @@ function App({ apis }: AppProps) {
   }, [apis]);
 
   React.useEffect(() => {
-    if (embeddedSessionChat) {
-      return;
-    }
-
     void refreshGitHubAuthStatus(apis.github, { force: true });
-  }, [apis.github, embeddedSessionChat, refreshGitHubAuthStatus]);
-
-  useGitHubPrBackgroundTracking(embeddedBackgroundWorkEnabled ? apis.github : undefined, apis.git);
+  }, [apis.github, refreshGitHubAuthStatus]);
 
   React.useEffect(() => {
     if (typeof document === 'undefined') {
@@ -189,60 +152,33 @@ function App({ apis }: AppProps) {
   }, [isInitialized]);
 
   React.useEffect(() => {
+    let cancelled = false;
+
     const init = async () => {
-      // VS Code runtime bootstraps config + sessions after the managed OpenCode instance reports "connected".
-      // Doing the default initialization here can race with startup and lead to one-shot failures.
       if (isVSCodeRuntime) {
+        if (!cancelled) {
+          setConnectionCheckCompleted(true);
+        }
         return;
       }
+
+      if (!cancelled) {
+        setConnectionCheckCompleted(false);
+      }
+
       await initializeApp();
-    };
 
-    init();
-  }, [initializeApp, isVSCodeRuntime]);
-
-  const startupRecoveryInProgressRef = React.useRef(false);
-  const startupRecoveryLastAttemptRef = React.useRef(0);
-
-  React.useEffect(() => {
-    if (isVSCodeRuntime) {
-      return;
-    }
-    if (!isConnected) {
-      return;
-    }
-    if (providersCount > 0 && agentsCount > 0) {
-      return;
-    }
-    if (startupRecoveryInProgressRef.current) {
-      return;
-    }
-
-    const now = Date.now();
-    if (now - startupRecoveryLastAttemptRef.current < 750) {
-      return;
-    }
-
-    startupRecoveryLastAttemptRef.current = now;
-    startupRecoveryInProgressRef.current = true;
-
-    const repair = async () => {
-      try {
-        if (providersCount === 0) {
-          await loadProviders();
-        }
-        if (agentsCount === 0) {
-          await loadAgents();
-        }
-      } catch {
-        // Keep UI responsive; we'll retry on next cycle.
-      } finally {
-        startupRecoveryInProgressRef.current = false;
+      if (!cancelled) {
+        setConnectionCheckCompleted(true);
       }
     };
 
-    void repair();
-  }, [agentsCount, isConnected, isVSCodeRuntime, loadAgents, loadProviders, providersCount]);
+    void init();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initializeApp, isVSCodeRuntime]);
 
   React.useEffect(() => {
     if (isSwitchingDirectory) {
@@ -267,95 +203,6 @@ function App({ apis }: AppProps) {
   }, [currentDirectory, isSwitchingDirectory, loadSessions, isConnected, isVSCodeRuntime]);
 
   React.useEffect(() => {
-    if (!embeddedSessionChat || typeof window === 'undefined') {
-      return;
-    }
-
-    const applyVisibility = (payload?: EmbeddedVisibilityPayload) => {
-      const nextVisible = payload?.visible === true;
-      setIsEmbeddedVisible(nextVisible);
-    };
-
-    const handleMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) {
-        return;
-      }
-
-      const data = event.data as { type?: unknown; payload?: EmbeddedVisibilityPayload };
-      if (data?.type !== 'openchamber:embedded-visibility') {
-        return;
-      }
-
-      applyVisibility(data.payload);
-    };
-
-    const scopedWindow = window as unknown as {
-      __openchamberSetEmbeddedVisibility?: (payload?: EmbeddedVisibilityPayload) => void;
-    };
-
-    scopedWindow.__openchamberSetEmbeddedVisibility = applyVisibility;
-    window.addEventListener('message', handleMessage);
-
-    return () => {
-      window.removeEventListener('message', handleMessage);
-      if (scopedWindow.__openchamberSetEmbeddedVisibility === applyVisibility) {
-        delete scopedWindow.__openchamberSetEmbeddedVisibility;
-      }
-    };
-  }, [embeddedSessionChat]);
-
-  React.useEffect(() => {
-    if (!embeddedSessionChat?.directory || isVSCodeRuntime) {
-      return;
-    }
-
-    if (currentDirectory === embeddedSessionChat.directory) {
-      return;
-    }
-
-    setDirectory(embeddedSessionChat.directory, { showOverlay: false });
-  }, [currentDirectory, embeddedSessionChat, isVSCodeRuntime, setDirectory]);
-
-  React.useEffect(() => {
-    if (!embeddedSessionChat || isVSCodeRuntime) {
-      return;
-    }
-
-    if (currentSessionId === embeddedSessionChat.sessionId) {
-      return;
-    }
-
-    if (!sessions.some((session) => session.id === embeddedSessionChat.sessionId)) {
-      return;
-    }
-
-    void setCurrentSession(embeddedSessionChat.sessionId);
-  }, [currentSessionId, embeddedSessionChat, isVSCodeRuntime, sessions, setCurrentSession]);
-
-  React.useEffect(() => {
-    if (!embeddedSessionChat || typeof window === 'undefined') {
-      return;
-    }
-
-    const handleStorage = (event: StorageEvent) => {
-      if (event.storageArea !== window.localStorage) {
-        return;
-      }
-
-      if (event.key !== 'ui-store') {
-        return;
-      }
-
-      void useUIStore.persist.rehydrate();
-    };
-
-    window.addEventListener('storage', handleStorage);
-    return () => {
-      window.removeEventListener('storage', handleStorage);
-    };
-  }, [embeddedSessionChat]);
-
-  React.useEffect(() => {
     if (typeof window === 'undefined') return;
     if (!isInitialized || isSwitchingDirectory) return;
     if (appReadyDispatchedRef.current) return;
@@ -364,17 +211,13 @@ function App({ apis }: AppProps) {
     window.dispatchEvent(new Event('openchamber:app-ready'));
   }, [isInitialized, isSwitchingDirectory]);
 
-  useEventStream({ enabled: embeddedBackgroundWorkEnabled });
+  useEventStream();
 
   // Server-authoritative session status polling
   // Replaces SSE-dependent status updates with reliable HTTP polling
-  useServerSessionStatus({ enabled: embeddedBackgroundWorkEnabled });
+  useServerSessionStatus();
 
-  usePushVisibilityBeacon({ enabled: embeddedBackgroundWorkEnabled });
-  usePwaManifestSync();
-  usePwaInstallPrompt();
-
-  useWindowTitle();
+  usePushVisibilityBeacon();
 
   useRouter();
 
@@ -386,15 +229,25 @@ function App({ apis }: AppProps) {
 
   useMenuActions(handleToggleMemoryDebug);
 
-  useSessionStatusBootstrap({ enabled: embeddedBackgroundWorkEnabled });
-  useSessionAutoCleanup({ enabled: embeddedBackgroundWorkEnabled });
-  useQueuedMessageAutoSend({ enabled: embeddedBackgroundWorkEnabled });
-
+  const settingsAutoCreateWorktree = useConfigStore((state) => state.settingsAutoCreateWorktree);
   React.useEffect(() => {
-    if (embeddedSessionChat) {
+    if (!isDesktopShell() || !isTauriShell()) {
+      return;
+    }
+    const tauri = (window as unknown as { __TAURI__?: { core?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } } }).__TAURI__;
+    if (typeof tauri?.core?.invoke !== 'function') {
       return;
     }
 
+    void tauri.core.invoke('desktop_set_auto_worktree_menu', { enabled: settingsAutoCreateWorktree });
+  }, [settingsAutoCreateWorktree]);
+
+
+
+  useSessionStatusBootstrap();
+  useSessionAutoCleanup();
+
+  React.useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (hasModifier(e) && e.shiftKey && e.key === 'D') {
         e.preventDefault();
@@ -404,65 +257,189 @@ function App({ apis }: AppProps) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [embeddedSessionChat]);
+  }, []);
 
   React.useEffect(() => {
-    if (embeddedSessionChat) {
-      return;
-    }
-
     if (error) {
 
       setTimeout(() => clearError(), 5000);
     }
-  }, [clearError, embeddedSessionChat, error]);
+  }, [error, clearError]);
 
   React.useEffect(() => {
-    if (embeddedSessionChat) {
-      return;
-    }
-
     if (!isDesktopShell() || !isDesktopLocalOriginActive()) {
       return;
     }
 
     let cancelled = false;
     const run = async () => {
-      const res = await fetch('/health', { method: 'GET' }).catch(() => null);
-      if (!res || !res.ok || cancelled) return;
-      const data = (await res.json().catch(() => null)) as null | {
-        openCodeRunning?: unknown;
-        isOpenCodeReady?: unknown;
-        opencodeBinaryResolved?: unknown;
-        lastOpenCodeError?: unknown;
-      };
-      if (!data || cancelled) return;
-      const openCodeRunning = data.openCodeRunning === true;
-      const isOpenCodeReady = data.isOpenCodeReady === true;
-      const resolvedBinary = typeof data.opencodeBinaryResolved === 'string' ? data.opencodeBinaryResolved.trim() : '';
-      const hasResolvedBinary = resolvedBinary.length > 0;
-      const err = typeof data.lastOpenCodeError === 'string' ? data.lastOpenCodeError : '';
-      const cliMissing =
-        !openCodeRunning &&
-        (CLI_MISSING_ERROR_REGEX.test(err) || (!hasResolvedBinary && !isOpenCodeReady));
-      setShowCliOnboarding(cliMissing);
+      try {
+        const res = await fetch('/health', { method: 'GET' });
+        if (!res.ok) return;
+        const data = (await res.json().catch(() => null)) as null | { openCodeRunning?: unknown; lastOpenCodeError?: unknown };
+        if (!data || cancelled) return;
+        const openCodeRunning = data.openCodeRunning === true;
+        const err = typeof data.lastOpenCodeError === 'string' ? data.lastOpenCodeError : '';
+        const cliMissing =
+          !openCodeRunning &&
+          /ENOENT|spawn\s+opencode|Unable\s+to\s+locate\s+the\s+opencode\s+CLI|OpenCode\s+CLI\s+not\s+found|opencode(\.exe)?\s+not\s+found|env:\s*(node|bun):\s*No\s+such\s+file\s+or\s+directory|(node|bun):\s*No\s+such\s+file\s+or\s+directory/i.test(err);
+        setShowCliOnboarding(cliMissing);
+      } catch {
+        // ignore
+      }
     };
 
     void run();
-    const interval = window.setInterval(() => {
-      void run();
-    }, CLI_ONBOARDING_HEALTH_POLL_MS);
-
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
     };
-  }, [embeddedSessionChat]);
+  }, []);
 
   const handleCliAvailable = React.useCallback(() => {
     setShowCliOnboarding(false);
     window.location.reload();
   }, []);
+
+  const handleRetryConnection = React.useCallback(async () => {
+    setIsRetryingConnection(true);
+    try {
+      await initializeApp();
+      setConnectionCheckCompleted(true);
+    } finally {
+      setIsRetryingConnection(false);
+    }
+  }, [initializeApp]);
+
+  const sortedInstances = React.useMemo(() => {
+    return [...instances].sort((a, b) => (b.lastUsedAt ?? 0) - (a.lastUsedAt ?? 0));
+  }, [instances]);
+
+  const alternativeInstances = React.useMemo(() => {
+    return sortedInstances.filter((instance) => instance.id !== currentInstanceId);
+  }, [currentInstanceId, sortedInstances]);
+
+  const handleSwitchInstance = React.useCallback((instanceId: string) => {
+    if (!instanceId || instanceId === currentInstanceId) {
+      return;
+    }
+    setCurrentInstance(instanceId);
+    touchInstance(instanceId);
+    window.location.reload();
+  }, [currentInstanceId, setCurrentInstance, touchInstance]);
+
+  const showConnectionRecoveryDialog = connectionCheckCompleted
+    && !isVSCodeRuntime
+    && !isConnected
+    && !isDeviceLoginOpen;
+
+  const isMobileShellRuntime = React.useMemo(() => isMobileRuntime(), []);
+
+  const requestBiometricUnlock = React.useCallback(async () => {
+    if (!isNativeMobileApp() || !biometricLockEnabled) {
+      setBiometricRequired(false);
+      return true;
+    }
+
+    setBiometricBusy(true);
+    try {
+      const status = await getBiometricStatus();
+      if (!status.isAvailable) {
+        setBiometricRequired(true);
+        return false;
+      }
+
+      const authenticated = await authenticateWithBiometrics('Unlock OpenChamber', {
+        allowDeviceCredential: true,
+        title: 'Unlock OpenChamber',
+        subtitle: 'Authenticate to continue',
+        confirmationRequired: false,
+      });
+      setBiometricRequired(!authenticated);
+      return authenticated;
+    } finally {
+      setBiometricBusy(false);
+    }
+  }, [biometricLockEnabled]);
+
+  React.useEffect(() => {
+    if (!isNativeMobileApp() || !biometricLockEnabled) {
+      setBiometricRequired(false);
+      return;
+    }
+    void requestBiometricUnlock();
+  }, [biometricLockEnabled, requestBiometricUnlock]);
+
+  const connectionRecoveryDialog = showConnectionRecoveryDialog ? (
+    <Dialog open={showConnectionRecoveryDialog} onOpenChange={() => {}}>
+      <DialogContent className="max-w-md" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>Connection required</DialogTitle>
+          <DialogDescription>
+            Unable to reach `{opencodeClient.getBaseUrl()}`. Retry, switch to another saved instance, or connect a new one.
+          </DialogDescription>
+        </DialogHeader>
+
+        {alternativeInstances.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {alternativeInstances.slice(0, 4).map((instance) => (
+              <Button
+                key={instance.id}
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => handleSwitchInstance(instance.id)}
+              >
+                {instance.label || instance.origin}
+              </Button>
+            ))}
+          </div>
+        ) : null}
+
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setDeviceLoginOpen(true);
+            }}
+          >
+            {isMobileShellRuntime ? 'Connect Another Instance' : 'Add Instance'}
+          </Button>
+          <Button type="button" onClick={() => void handleRetryConnection()} disabled={isRetryingConnection}>
+            {isRetryingConnection ? 'Retrying...' : 'Retry'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  ) : null;
+
+  const biometricLockDialog = biometricRequired ? (
+    <Dialog open={biometricRequired} onOpenChange={() => {}}>
+      <DialogContent className="max-w-md" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>Unlock OpenChamber</DialogTitle>
+          <DialogDescription>
+            Biometric verification is required to access this app.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setBiometricLockEnabled(false);
+              setBiometricRequired(false);
+            }}
+          >
+            Disable lock
+          </Button>
+          <Button type="button" onClick={() => void requestBiometricUnlock()} disabled={biometricBusy}>
+            {biometricBusy ? 'Checking...' : 'Unlock'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  ) : null;
 
   if (showCliOnboarding) {
     return (
@@ -470,21 +447,6 @@ function App({ apis }: AppProps) {
         <div className="h-full text-foreground bg-transparent">
           <OnboardingScreen onCliAvailable={handleCliAvailable} />
         </div>
-      </ErrorBoundary>
-    );
-  }
-
-  if (embeddedSessionChat) {
-    return (
-      <ErrorBoundary>
-        <RuntimeAPIProvider apis={apis}>
-          <TooltipProvider delayDuration={700} skipDelayDuration={150}>
-            <div className="h-full text-foreground bg-background">
-              <ChatView />
-              <Toaster />
-            </div>
-          </TooltipProvider>
-        </RuntimeAPIProvider>
       </ErrorBoundary>
     );
   }
@@ -497,18 +459,19 @@ function App({ apis }: AppProps) {
       : 'chat';
     
     if (panelType === 'agentManager') {
-    return (
-      <ErrorBoundary>
-        <RuntimeAPIProvider apis={apis}>
-          <TooltipProvider delayDuration={700} skipDelayDuration={150}>
-            <div className="h-full text-foreground bg-background">
-              <AgentManagerView />
-              <Toaster />
-            </div>
-          </TooltipProvider>
-        </RuntimeAPIProvider>
-      </ErrorBoundary>
-    );
+      return (
+        <ErrorBoundary>
+          <RuntimeAPIProvider apis={apis}>
+            <TooltipProvider delayDuration={700} skipDelayDuration={150}>
+              <div className="h-full text-foreground bg-background">
+                <AgentManagerView />
+                <Toaster />
+                {connectionRecoveryDialog}
+              </div>
+            </TooltipProvider>
+          </RuntimeAPIProvider>
+        </ErrorBoundary>
+      );
     }
     
     return (
@@ -519,6 +482,7 @@ function App({ apis }: AppProps) {
               <div className="h-full text-foreground bg-background">
                 <VSCodeLayout />
                 <Toaster />
+                {connectionRecoveryDialog}
               </div>
             </TooltipProvider>
           </FireworksProvider>
@@ -533,18 +497,20 @@ function App({ apis }: AppProps) {
         <GitPollingProvider>
           <FireworksProvider>
             <VoiceProvider>
-              <TooltipProvider delayDuration={700} skipDelayDuration={150}>
-                <div className="h-full text-foreground bg-background">
-                  <MainLayout />
-                  <Toaster />
-                  <ConfigUpdateOverlay />
-                  <AboutDialogWrapper />
-                  {showMemoryDebug && (
-                    <MemoryDebugPanel onClose={() => setShowMemoryDebug(false)} />
-                  )}
-                </div>
-              </TooltipProvider>
-            </VoiceProvider>
+            <TooltipProvider delayDuration={700} skipDelayDuration={150}>
+              <div className="h-full text-foreground bg-background">
+              <MainLayout />
+              <Toaster />
+              <ConfigUpdateOverlay />
+              <AboutDialogWrapper />
+                {showMemoryDebug && (
+                  <MemoryDebugPanel onClose={() => setShowMemoryDebug(false)} />
+                )}
+              {connectionRecoveryDialog}
+              {biometricLockDialog}
+              </div>
+            </TooltipProvider>
+          </VoiceProvider>
           </FireworksProvider>
         </GitPollingProvider>
       </RuntimeAPIProvider>

@@ -1097,7 +1097,7 @@ export const Header: React.FC<HeaderProps> = ({
             </TooltipContent>
           </Tooltip>
         )}
-        <OpenInAppButton directory={openDirectory} activeFilePath={selectedFilePath} className="mr-1" />
+        <OpenInAppButton directory={openDirectory} className="mr-1" />
         <DropdownMenu
             open={isDesktopServicesOpen}
             onOpenChange={(open) => {

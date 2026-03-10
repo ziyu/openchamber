@@ -4,6 +4,7 @@ import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { opencodeClient } from '@/lib/opencode/client';
 import { checkIsGitRepository } from '@/lib/gitApi';
+import { writeTextToClipboard } from '@/lib/desktop';
 import { streamDebugEnabled } from '@/stores/utils/streamDebug';
 import { copyTextToClipboard as copyPlainTextToClipboard } from '@/lib/clipboard';
 
@@ -380,8 +381,10 @@ export const debugUtils = {
 
   async copyDiagnosticsReport() {
     const report = await this.buildDiagnosticsReport();
-    const result = await this.copyTextToClipboard(report);
-    return { ...result, report } as const;
+    if (await writeTextToClipboard(report)) {
+      return { ok: true, report } as const;
+    }
+    return { ok: false, report } as const;
   },
 
    checkLastMessage() {

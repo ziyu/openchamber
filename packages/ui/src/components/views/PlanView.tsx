@@ -10,6 +10,7 @@ import { buildCodeMirrorCommentWidgets, normalizeLineRange, useInlineCommentCont
 
 import { getLanguageFromExtension } from '@/lib/toolHelpers';
 import { useDeviceInfo } from '@/lib/device';
+import { writeTextToClipboard } from '@/lib/desktop';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { generateSyntaxTheme } from '@/lib/theme/syntaxThemeGenerator';
 import { createFlexokiCodeMirrorTheme } from '@/lib/codemirror/flexokiTheme';
@@ -392,8 +393,10 @@ export const PlanView: React.FC = () => {
               variant="ghost"
               size="sm"
               onClick={async () => {
-                const result = await copyTextToClipboard(content);
-                if (result.ok) {
+                try {
+                  if (!(await writeTextToClipboard(content))) {
+                    throw new Error('copy failed');
+                  }
                   setCopiedContent(true);
                   if (copiedContentTimeoutRef.current !== null) {
                     window.clearTimeout(copiedContentTimeoutRef.current);
@@ -401,7 +404,7 @@ export const PlanView: React.FC = () => {
                   copiedContentTimeoutRef.current = window.setTimeout(() => {
                     setCopiedContent(false);
                   }, 1200);
-                } else {
+                } catch {
                   // ignored
                 }
               }}
@@ -419,8 +422,10 @@ export const PlanView: React.FC = () => {
               variant="ghost"
               size="sm"
               onClick={async () => {
-                const result = await copyTextToClipboard(displayPath ?? resolvedPath);
-                if (result.ok) {
+                try {
+                  if (!(await writeTextToClipboard(displayPath ?? resolvedPath))) {
+                    throw new Error('copy failed');
+                  }
                   setCopiedPath(true);
                   if (copiedTimeoutRef.current !== null) {
                     window.clearTimeout(copiedTimeoutRef.current);
@@ -428,7 +433,7 @@ export const PlanView: React.FC = () => {
                   copiedTimeoutRef.current = window.setTimeout(() => {
                     setCopiedPath(false);
                   }, 1200);
-                } else {
+                } catch {
                   // ignored
                 }
               }}

@@ -2,10 +2,11 @@ import React from 'react';
 import { RiInformationLine, RiRestartLine } from '@remixicon/react';
 import { useUIStore } from '@/stores/useUIStore';
 import { useConfigStore } from '@/stores/useConfigStore';
-import { isDesktopShell, isVSCodeRuntime } from '@/lib/desktop';
+import { isDesktopShell, isNativeMobileApp, isVSCodeRuntime, requestNativeNotificationPermission } from '@/lib/desktop';
 import { useDeviceInfo } from '@/lib/device';
 import { updateDesktopSettings } from '@/lib/persistence';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
 import { toast } from '@/components/ui';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { GridLoader } from '@/components/ui/grid-loader';
@@ -34,8 +35,9 @@ const DEFAULT_MAX_LAST_MESSAGE_LENGTH = 250;
 export const NotificationSettings: React.FC = () => {
   const { isMobile } = useDeviceInfo();
   const isDesktop = React.useMemo(() => isDesktopShell(), []);
+  const isNativeMobile = React.useMemo(() => isNativeMobileApp(), []);
   const isVSCode = React.useMemo(() => isVSCodeRuntime(), []);
-  const isBrowser = !isDesktop && !isVSCode;
+  const isBrowser = !isDesktop && !isVSCode && !isNativeMobile;
   const nativeNotificationsEnabled = useUIStore(state => state.nativeNotificationsEnabled);
   const setNativeNotificationsEnabled = useUIStore(state => state.setNativeNotificationsEnabled);
   const notificationMode = useUIStore(state => state.notificationMode);
@@ -159,6 +161,15 @@ export const NotificationSettings: React.FC = () => {
   );
 
   React.useEffect(() => {
+    if (isNativeMobile) {
+      setPushSupported(false);
+      setPushSubscribed(false);
+      void requestNativeNotificationPermission().then((permission) => {
+        setNotificationPermission(permission);
+      });
+      return;
+    }
+
     if (!isBrowser) {
       setPushSupported(false);
       setPushSubscribed(false);
@@ -195,11 +206,28 @@ export const NotificationSettings: React.FC = () => {
     };
 
     void refresh();
-  }, [isBrowser]);
+  }, [isBrowser, isNativeMobile]);
 
   const handleToggleChange = async (checked: boolean) => {
     if (isDesktop) {
       setNativeNotificationsEnabled(checked);
+      return;
+    }
+
+    if (isNativeMobile) {
+      if (!checked) {
+        setNativeNotificationsEnabled(false);
+        return;
+      }
+
+      const permission = await requestNativeNotificationPermission();
+      setNotificationPermission(permission);
+      if (permission === 'granted') {
+        setNativeNotificationsEnabled(true);
+      } else {
+        setNativeNotificationsEnabled(false);
+        toast.error('Notification permission denied');
+      }
       return;
     }
 
@@ -229,7 +257,9 @@ export const NotificationSettings: React.FC = () => {
     }
   };
 
-  const canShowNotifications = isDesktop || isVSCode || (isBrowser && typeof Notification !== 'undefined' && Notification.permission === 'granted');
+  const canShowNotifications = isDesktop
+    || (isNativeMobile && notificationPermission === 'granted')
+    || (isBrowser && typeof Notification !== 'undefined' && Notification.permission === 'granted');
 
   const updateTemplate = (
     event: 'completion' | 'error' | 'question' | 'subtask',

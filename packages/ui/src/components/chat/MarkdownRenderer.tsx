@@ -10,7 +10,7 @@ import { RiFileCopyLine, RiCheckLine, RiDownloadLine } from '@remixicon/react';
 import { toast } from '@/components/ui';
 import { copyTextToClipboard } from '@/lib/clipboard';
 
-import { isVSCodeRuntime } from '@/lib/desktop';
+import { isVSCodeRuntime, writeTextToClipboard } from '@/lib/desktop';
 import { useOptionalThemeSystem } from '@/contexts/useThemeSystem';
 import { getStreamdownThemePair } from '@/lib/shiki/appThemeRegistry';
 import { getDefaultTheme } from '@/lib/theme/themes';

@@ -58,7 +58,7 @@ const OPENCHAMBER_VERSION = (() => {
     if (pkg && typeof pkg.version === 'string' && pkg.version.trim().length > 0) {
       return pkg.version.trim();
     }
-  } catch {
+  } catch (_) {
   }
   return 'unknown';
 })();
@@ -153,7 +153,7 @@ const normalizeNamedTunnelHostname = (value) => {
         return new URL(trimmed);
       }
       return new URL(`https://${trimmed}`);
-    } catch {
+    } catch (_) {
       return null;
     }
   })();
@@ -457,7 +457,7 @@ const shouldSkipSearchDirectory = (name, includeHidden) => {
 const listDirectoryEntries = async (dirPath) => {
   try {
     return await fsPromises.readdir(dirPath, { withFileTypes: true });
-  } catch {
+  } catch (_) {
     return [];
   }
 };
@@ -582,7 +582,7 @@ const searchFilesystemFiles = async (rootPath, options) => {
           );
 
           return { dir, dirents, ignoredPaths: ignoredNames };
-        } catch {
+        } catch (_) {
           return { dir, dirents: await listDirectoryEntries(dir), ignoredPaths: new Set() };
         }
       })
@@ -778,7 +778,7 @@ const resolveZenModel = async (override) => {
     if (typeof settings?.zenModel === 'string' && settings.zenModel.trim().length > 0) {
       return settings.zenModel.trim();
     }
-  } catch {
+  } catch (_) {
     // ignore
   }
   return validatedZenFallback || ZEN_DEFAULT_MODEL;
@@ -847,7 +847,7 @@ const summarizeText = async (text, targetLength, zenModel) => {
       ?.content?.find((item) => item?.type === 'output_text')?.text?.trim();
 
     return summary || text;
-  } catch {
+  } catch (_) {
     return text;
   }
 };
@@ -953,7 +953,7 @@ const fetchLastAssistantMessageText = async (sessionId, messageId, maxLength = N
     if (!target || !Array.isArray(target.parts)) return '';
 
     return extractTextFromParts(target.parts, maxLength);
-  } catch {
+  } catch (_) {
     return '';
   }
 };
@@ -1125,7 +1125,7 @@ const buildTemplateVariables = async (payload, sessionId) => {
         worktreeDir = typeof activeProject.path === 'string' ? activeProject.path : '';
       }
     }
-  } catch {
+  } catch (_) {
     // Settings read failed — derive from directory if available
     if (worktreeDir && !projectName) {
       projectName = worktreeDir.split('/').filter(Boolean).pop() || '';
@@ -1141,7 +1141,7 @@ const buildTemplateVariables = async (payload, sessionId) => {
         git.revparse(['--abbrev-ref', 'HEAD']),
         new Promise((_, reject) => setTimeout(() => reject(new Error('git timeout')), 3000)),
       ]).catch(() => '');
-    } catch {
+    } catch (_) {
       // ignore — git may not be available
     }
   }
@@ -1260,7 +1260,7 @@ const parseProjectIconDataUrl = (value) => {
       return { ok: false, error: 'Icon exceeds size limit (5 MB)' };
     }
     return { ok: true, mime, bytes };
-  } catch {
+  } catch (_) {
     return { ok: false, error: 'Failed to decode icon data' };
   }
 };
@@ -1964,6 +1964,12 @@ const sanitizeSettingsUpdate = (payload) => {
       result.notificationMode = mode;
     }
   }
+  if (typeof candidate.mobileHapticsEnabled === 'boolean') {
+    result.mobileHapticsEnabled = candidate.mobileHapticsEnabled;
+  }
+  if (typeof candidate.biometricLockEnabled === 'boolean') {
+    result.biometricLockEnabled = candidate.biometricLockEnabled;
+  }
   if (typeof candidate.notifyOnSubtasks === 'boolean') {
     result.notifyOnSubtasks = candidate.notifyOnSubtasks;
   }
@@ -2426,7 +2432,7 @@ const migrateSettingsFromLegacyLastDirectory = async (current) => {
           nextActiveProjectId = id;
           changed = true;
         }
-      } catch {
+      } catch (_) {
         // ignore invalid lastDirectory
       }
     }
@@ -2647,7 +2653,7 @@ const getUiSessionTokenFromRequest = (req) => {
     const value = rest.join('=').trim();
     try {
       return decodeURIComponent(value || '');
-    } catch {
+    } catch (_) {
       return value || null;
     }
   }
@@ -2681,12 +2687,12 @@ const rejectWebSocketUpgrade = (socket, statusCode, reason) => {
       `Content-Length: ${body.length}\r\n\r\n`
     );
     socket.write(body);
-  } catch {
+  } catch (_) {
   }
 
   try {
     socket.destroy();
-  } catch {
+  } catch (_) {
   }
 };
 
@@ -2721,7 +2727,7 @@ const getRequestOriginCandidates = async (req) => {
     if (typeof settings?.publicOrigin === 'string' && settings.publicOrigin.trim().length > 0) {
       origins.add(new URL(settings.publicOrigin.trim()).origin);
     }
-  } catch {
+  } catch (_) {
   }
 
   return origins;
@@ -2733,15 +2739,309 @@ const isRequestOriginAllowed = async (req) => {
     return false;
   }
 
-  let normalizedOrigin = '';
+  let parsedOrigin;
   try {
-    normalizedOrigin = new URL(originHeader).origin;
-  } catch {
+    parsedOrigin = new URL(originHeader);
+  } catch (_) {
     return false;
+  }
+
+  const protocol = parsedOrigin.protocol.toLowerCase();
+  const hostname = parsedOrigin.hostname.toLowerCase();
+  const isLocalTauriOrigin = (protocol === 'tauri:' || protocol === 'app:')
+    && (hostname === 'localhost' || hostname === 'tauri.localhost' || hostname === 'app.localhost');
+  if (isLocalTauriOrigin) {
+    return true;
+  }
+
+  const normalizedOrigin = parsedOrigin.origin;
+  if (normalizedOrigin === 'null') {
+    return false;
+  }
+
+  const isSecureTauriLocalhost = (protocol === 'https:' || protocol === 'http:')
+    && (hostname === 'tauri.localhost' || hostname === 'app.localhost');
+  if (isSecureTauriLocalhost) {
+    return true;
   }
 
   const allowedOrigins = await getRequestOriginCandidates(req);
   return allowedOrigins.has(normalizedOrigin);
+};
+
+const DEVICE_GRANT_TTL_MS = 10 * 60 * 1000;
+const DEVICE_GRANT_DEFAULT_INTERVAL_SECONDS = 5;
+const DEVICE_CODE_BYTES = 24;
+const DEVICE_TOKEN_BYTES = 48;
+const DEVICE_POLL_MIN_INTERVAL_MS = 1000;
+const DEVICE_TOKEN_TTL_DAYS = Number.parseInt(process.env.OPENCHAMBER_DEVICE_TOKEN_TTL_DAYS || '30', 10);
+const DEVICE_LAST_USED_TOUCH_MS = 60 * 1000;
+const DEVICE_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+const pendingDeviceGrantsByCode = new Map();
+const pendingDeviceGrantCodeByUserCode = new Map();
+const deviceLastUsedTouchCache = new Map();
+
+const normalizedDeviceTokenTtlMs = Math.max(1, Number.isFinite(DEVICE_TOKEN_TTL_DAYS) ? DEVICE_TOKEN_TTL_DAYS : 30) * 24 * 60 * 60 * 1000;
+
+const normalizeUserCode = (value) => {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+};
+
+const formatUserCode = (value) => {
+  const normalized = normalizeUserCode(value);
+  if (normalized.length < 8) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 4)}-${normalized.slice(4, 8)}`;
+};
+
+const randomCode = (length) => {
+  let output = '';
+  for (let i = 0; i < length; i += 1) {
+    output += DEVICE_CODE_CHARS[Math.floor(Math.random() * DEVICE_CODE_CHARS.length)];
+  }
+  return output;
+};
+
+const createUserCode = () => {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const raw = randomCode(8);
+    const normalized = normalizeUserCode(raw);
+    if (!pendingDeviceGrantCodeByUserCode.has(normalized)) {
+      return formatUserCode(normalized);
+    }
+  }
+  return formatUserCode(`${Date.now().toString(36).toUpperCase()}${randomCode(8)}`.slice(0, 8));
+};
+
+const normalizeDeviceRecord = (entry) => {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+
+  const id = typeof entry.id === 'string' && entry.id.trim().length > 0 ? entry.id.trim() : null;
+  const tokenHash = typeof entry.tokenHash === 'string' && entry.tokenHash.trim().length > 0 ? entry.tokenHash.trim() : null;
+  const name = typeof entry.name === 'string' && entry.name.trim().length > 0 ? entry.name.trim() : 'Device';
+  const createdAt = Number.isFinite(entry.createdAt) ? Number(entry.createdAt) : Date.now();
+  const expiresAt = Number.isFinite(entry.expiresAt) ? Number(entry.expiresAt) : createdAt + normalizedDeviceTokenTtlMs;
+  const lastUsedAt = Number.isFinite(entry.lastUsedAt) ? Number(entry.lastUsedAt) : null;
+  const userAgent = typeof entry.userAgent === 'string' ? entry.userAgent : '';
+  const platform = entry.platform && typeof entry.platform === 'object' ? {
+    ...(typeof entry.platform.os === 'string' && entry.platform.os.trim().length > 0 ? { os: entry.platform.os.trim() } : {}),
+    ...(typeof entry.platform.model === 'string' && entry.platform.model.trim().length > 0 ? { model: entry.platform.model.trim() } : {}),
+  } : {};
+
+  if (!id || !tokenHash) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    createdAt,
+    lastUsedAt,
+    expiresAt,
+    userAgent,
+    platform,
+    tokenHash,
+  };
+};
+
+const readDeviceRecordsFromSettings = async () => {
+  const settings = await readSettingsFromDiskMigrated();
+  const entries = Array.isArray(settings?.devices) ? settings.devices : [];
+  return entries
+    .map(normalizeDeviceRecord)
+    .filter(Boolean);
+};
+
+const writeDeviceRecordsToSettings = async (devices) => {
+  const settings = await readSettingsFromDiskMigrated();
+  await writeSettingsToDisk({
+    ...settings,
+    devices,
+  });
+};
+
+const hashDeviceToken = (token) => {
+  return crypto.createHash('sha256').update(token).digest('hex');
+};
+
+const parseDevicePlatform = (userAgent) => {
+  if (typeof userAgent !== 'string' || userAgent.length === 0) {
+    return {};
+  }
+
+  const ua = userAgent.toLowerCase();
+  const os = ua.includes('windows')
+    ? 'Windows'
+    : ua.includes('mac os') || ua.includes('macintosh')
+      ? 'macOS'
+      : ua.includes('android')
+        ? 'Android'
+        : ua.includes('iphone') || ua.includes('ipad') || ua.includes('ios')
+          ? 'iOS'
+          : ua.includes('linux')
+            ? 'Linux'
+            : undefined;
+
+  const model = ua.includes('iphone')
+    ? 'iPhone'
+    : ua.includes('ipad')
+      ? 'iPad'
+      : ua.includes('android')
+        ? 'Android'
+        : undefined;
+
+  return {
+    ...(os ? { os } : {}),
+    ...(model ? { model } : {}),
+  };
+};
+
+const toPublicDeviceRecord = (record) => {
+  if (!record) {
+    return null;
+  }
+  return {
+    id: record.id,
+    name: record.name,
+    createdAt: record.createdAt,
+    lastUsedAt: record.lastUsedAt,
+    expiresAt: record.expiresAt,
+    userAgent: record.userAgent,
+    platform: record.platform,
+  };
+};
+
+const prunePendingDeviceGrants = () => {
+  const now = Date.now();
+  for (const [deviceCode, grant] of pendingDeviceGrantsByCode.entries()) {
+    if (!grant || typeof grant !== 'object') {
+      pendingDeviceGrantsByCode.delete(deviceCode);
+      continue;
+    }
+    if (grant.expiresAt <= now || grant.status === 'denied') {
+      pendingDeviceGrantsByCode.delete(deviceCode);
+      pendingDeviceGrantCodeByUserCode.delete(grant.userCodeNormalized);
+    }
+  }
+};
+
+const resolveRequestOrigin = async (req) => {
+  const explicit = typeof process.env.OPENCHAMBER_PUBLIC_ORIGIN === 'string' && process.env.OPENCHAMBER_PUBLIC_ORIGIN.trim().length > 0
+    ? process.env.OPENCHAMBER_PUBLIC_ORIGIN.trim()
+    : null;
+  if (explicit) {
+    try {
+      return new URL(explicit).origin;
+    } catch (_) {
+    }
+  }
+
+  try {
+    const settings = await readSettingsFromDiskMigrated();
+    if (typeof settings?.publicOrigin === 'string' && settings.publicOrigin.trim().length > 0) {
+      return new URL(settings.publicOrigin.trim()).origin;
+    }
+  } catch (_) {
+  }
+
+  const forwardedProto = typeof req.headers['x-forwarded-proto'] === 'string'
+    ? req.headers['x-forwarded-proto'].split(',')[0].trim().toLowerCase()
+    : '';
+  const protocol = forwardedProto || (req.socket?.encrypted ? 'https' : 'http');
+  const forwardedHost = typeof req.headers['x-forwarded-host'] === 'string'
+    ? req.headers['x-forwarded-host'].split(',')[0].trim()
+    : '';
+  const host = forwardedHost || (typeof req.headers.host === 'string' ? req.headers.host.trim() : '');
+  if (host) {
+    return `${protocol}://${host}`;
+  }
+
+  return null;
+};
+
+const getBearerTokenFromRequest = (req) => {
+  const value = typeof req.headers.authorization === 'string' ? req.headers.authorization.trim() : '';
+  if (value) {
+    const match = value.match(/^Bearer\s+(.+)$/i);
+    if (!match || !match[1]) {
+      return null;
+    }
+    const token = match[1].trim();
+    return token.length > 0 ? token : null;
+  }
+
+  const queryToken = (() => {
+    const fromExpressQuery = req.query?.access_token;
+    if (typeof fromExpressQuery === 'string' && fromExpressQuery.trim().length > 0) {
+      return fromExpressQuery.trim();
+    }
+    if (Array.isArray(fromExpressQuery) && typeof fromExpressQuery[0] === 'string' && fromExpressQuery[0].trim().length > 0) {
+      return fromExpressQuery[0].trim();
+    }
+
+    const rawUrl = typeof req.url === 'string' ? req.url : '';
+    if (!rawUrl) {
+      return null;
+    }
+
+    try {
+      const parsed = new URL(rawUrl, 'http://localhost');
+      const fromUrl = parsed.searchParams.get('access_token');
+      if (typeof fromUrl === 'string' && fromUrl.trim().length > 0) {
+        return fromUrl.trim();
+      }
+    } catch (_) {
+    }
+
+    return null;
+  })();
+
+  return queryToken;
+};
+
+const authenticateBearerDevice = async (req) => {
+  const token = getBearerTokenFromRequest(req);
+  if (!token) {
+    return null;
+  }
+
+  const tokenHash = hashDeviceToken(token);
+  const now = Date.now();
+  const devices = await readDeviceRecordsFromSettings();
+  const device = devices.find((entry) => entry.tokenHash === tokenHash) || null;
+  if (!device) {
+    return null;
+  }
+
+  if (device.expiresAt <= now) {
+    const nextDevices = devices.filter((entry) => entry.id !== device.id);
+    await writeDeviceRecordsToSettings(nextDevices);
+    return null;
+  }
+
+  const lastTouchAt = deviceLastUsedTouchCache.get(device.id) || 0;
+  if (now - lastTouchAt >= DEVICE_LAST_USED_TOUCH_MS && (!device.lastUsedAt || now - device.lastUsedAt >= DEVICE_LAST_USED_TOUCH_MS)) {
+    const nextDevices = devices.map((entry) => {
+      if (entry.id !== device.id) {
+        return entry;
+      }
+      return {
+        ...entry,
+        lastUsedAt: now,
+      };
+    });
+    deviceLastUsedTouchCache.set(device.id, now);
+    await writeDeviceRecordsToSettings(nextDevices);
+  }
+
+  return device;
 };
 
 const normalizePushSubscriptions = (record) => {
@@ -2972,7 +3272,7 @@ const updateSessionState = (sessionId, status, eventId, metadata = {}) => {
             needsAttention: attentionState?.needsAttention ?? false
           }
         });
-      } catch {
+      } catch (_) {
         // Client disconnected, will be cleaned up by close handler
       }
     }
@@ -3078,7 +3378,7 @@ const markSessionViewed = (sessionId, clientId) => {
               needsAttention: false
             }
           });
-        } catch {
+        } catch (_) {
           // Client disconnected
         }
       }
@@ -3245,7 +3545,7 @@ const resolveVapidSubject = async () => {
       }
       return trimmed;
     }
-  } catch {
+  } catch (_) {
     // ignore
   }
 
@@ -3450,7 +3750,7 @@ async function isOpenCodeProcessHealthy() {
       signal: AbortSignal.timeout(2000),
     });
     return response.ok;
-  } catch {
+  } catch (_) {
     return false;
   }
 }
@@ -3481,7 +3781,7 @@ async function probeExternalOpenCode(port, origin) {
     if (!response.ok) return false;
     const body = await response.json().catch(() => null);
     return body?.healthy === true;
-  } catch {
+  } catch (_) {
     return false;
   }
 }
@@ -3509,7 +3809,7 @@ const ENV_CONFIGURED_OPENCODE_HOST = (() => {
   let url;
   try {
     url = new URL(raw);
-  } catch {
+  } catch (_) {
     warnInvalidHost('not a valid URL');
     return null;
   }
@@ -3675,7 +3975,7 @@ function getLoginShellEnvSnapshot() {
         cachedLoginShellEnvSnapshot = parsed;
         return parsed;
       }
-    } catch {
+    } catch (_) {
       // ignore
     }
   }
@@ -3710,7 +4010,7 @@ function getWindowsShellEnvSnapshot() {
       if (parsed) {
         return parsed;
       }
-    } catch {
+    } catch (_) {
       // ignore
     }
   }
@@ -3725,7 +4025,7 @@ function getWindowsShellEnvSnapshot() {
     if (result.status === 0 && typeof result.stdout === 'string' && result.stdout.length > 0) {
       return parseNullSeparatedEnvSnapshot(result.stdout.replace(/\r?\n/g, '\0'));
     }
-  } catch {
+  } catch (_) {
     // ignore
   }
 
@@ -3806,7 +4106,7 @@ function isExecutable(filePath) {
     }
     fs.accessSync(filePath, fs.constants.X_OK);
     return true;
-  } catch {
+  } catch (_) {
     return false;
   }
 }
@@ -3876,7 +4176,7 @@ function resolveWslExecutablePath() {
         return found;
       }
     }
-  } catch {
+  } catch (_) {
     // ignore
   }
 
@@ -3937,7 +4237,7 @@ function probeWslForOpencode() {
       opencodePath: found,
       distro: ENV_CONFIGURED_OPENCODE_WSL_DISTRO,
     };
-  } catch {
+  } catch (_) {
     return null;
   }
 }
@@ -4045,7 +4345,7 @@ function resolveOpencodeCliPath() {
           return found;
         }
       }
-    } catch {
+    } catch (_) {
       // ignore
     }
     const wsl = probeWslForOpencode();
@@ -4076,7 +4376,7 @@ function resolveOpencodeCliPath() {
           return found;
         }
       }
-    } catch {
+    } catch (_) {
       // ignore
     }
   }
@@ -4126,7 +4426,7 @@ function resolveNodeCliPath() {
         const found = lines.find((line) => isExecutable(line));
         if (found) return found;
       }
-    } catch {
+    } catch (_) {
       // ignore
     }
     return null;
@@ -4146,7 +4446,7 @@ function resolveNodeCliPath() {
           return found;
         }
       }
-    } catch {
+    } catch (_) {
       // ignore
     }
   }
@@ -4207,7 +4507,7 @@ function resolveBunCliPath() {
         const found = lines.find((line) => isExecutable(line));
         if (found) return found;
       }
-    } catch {
+    } catch (_) {
       // ignore
     }
     return null;
@@ -4227,7 +4527,7 @@ function resolveBunCliPath() {
           return found;
         }
       }
-    } catch {
+    } catch (_) {
       // ignore
     }
   }
@@ -4288,11 +4588,11 @@ function readShebang(opencodePath) {
     } finally {
       try {
         fs.closeSync(fd);
-      } catch {
+      } catch (_) {
         // ignore
       }
     }
-  } catch {
+  } catch (_) {
     return null;
   }
 }
@@ -4330,7 +4630,7 @@ function normalizeOpencodeBinarySetting(raw) {
       const bin = process.platform === 'win32' ? 'opencode.exe' : 'opencode';
       return path.join(trimmed, bin);
     }
-  } catch {
+  } catch (_) {
     // ignore
   }
 
@@ -4402,7 +4702,7 @@ async function applyOpencodeBinaryFromSettings() {
     if (raw) {
       console.warn(`Configured settings.opencodeBinary is not executable: ${raw}`);
     }
-  } catch {
+  } catch (_) {
     // ignore
   }
 
@@ -4540,7 +4840,7 @@ const startGlobalEventWatcher = async () => {
           } else if (upstream?.body && !upstream.body.locked) {
             await upstream.body.cancel();
           }
-        } catch {
+        } catch (_) {
           // ignore
         }
       }
@@ -4559,7 +4859,7 @@ const stopGlobalEventWatcher = () => {
   }
   try {
     globalEventWatcherAbortController.abort();
-  } catch {
+  } catch (_) {
     // ignore
   }
   globalEventWatcherAbortController = null;
@@ -4656,7 +4956,7 @@ async function waitForReady(url, timeoutMs = 10000) {
           return true;
         }
       }
-    } catch {
+    } catch (_) {
       // ignore
     }
     await new Promise(r => setTimeout(r, 100));
@@ -4739,7 +5039,7 @@ function parseSseDataPayload(block) {
       return parsed.payload;
     }
     return parsed;
-  } catch {
+  } catch (_) {
     return null;
   }
 }
@@ -4834,7 +5134,7 @@ function emitDesktopNotification(payload) {
   try {
     // One-line protocol consumed by the Tauri shell.
     process.stdout.write(`${DESKTOP_NOTIFY_PREFIX}${JSON.stringify(payload)}\n`);
-  } catch {
+  } catch (_) {
     // ignore
   }
 }
@@ -4860,7 +5160,7 @@ function broadcastUiNotification(payload) {
           desktopStdoutActive: ENV_DESKTOP_NOTIFY,
         },
       });
-    } catch {
+    } catch (_) {
       // ignore
     }
   }
@@ -4998,7 +5298,7 @@ const fetchSessionParentId = async (sessionId) => {
     const parentID = match?.parentID ? match.parentID : null;
     setCachedSessionParentId(sessionId, parentID);
     return parentID;
-  } catch {
+  } catch (_) {
     return undefined;
   }
 };
@@ -5492,12 +5792,12 @@ function killProcessOnPort(port) {
       if (pid && pid !== myPid) {
         try {
           spawnSync('kill', ['-9', String(pid)], { stdio: 'ignore', timeout: 2000 });
-        } catch {
+        } catch (_) {
           // Ignore
         }
       }
     }
-  } catch {
+  } catch (_) {
     // Ignore - process may already be dead
   }
 }
@@ -5559,7 +5859,7 @@ async function createManagedOpenCodeServerProcess({
             }
           }
         }
-      } catch {
+      } catch (_) {
         // ignore – fall through to default spawn
       }
     }
@@ -5627,7 +5927,7 @@ async function createManagedOpenCodeServerProcess({
     close() {
       try {
         child.kill('SIGTERM');
-      } catch {
+      } catch (_) {
         // ignore
       }
     },
@@ -5715,7 +6015,7 @@ async function startOpenCode() {
     } else {
       try {
         serverInstance.close();
-      } catch {
+      } catch (_) {
         // ignore
       }
       throw new Error('Server started but health check failed (timeout)');
@@ -6138,7 +6438,7 @@ function setupProxy(app) {
         console.log(`[Win32PathFix] URL: "${upstreamPath}" → "${rewritten}"`);
       }
       return rewritten;
-    } catch {
+    } catch (_) {
       return upstreamPath;
     }
   };
@@ -6282,7 +6582,7 @@ function setupProxy(app) {
         try {
           res.write(': ping\n\n');
           resetIdleTimeout();
-        } catch {
+        } catch (_) {
         }
       }, 30 * 1000);
 
@@ -6305,7 +6605,7 @@ function setupProxy(app) {
       } finally {
         try {
           reader.releaseLock();
-        } catch {
+        } catch (_) {
         }
       }
 
@@ -6529,7 +6829,7 @@ function setupProxy(app) {
             projectDirs = (settings.projects || [])
               .map((project) => (typeof project?.path === 'string' ? project.path.trim() : ''))
               .filter(Boolean);
-          } catch {}
+          } catch (_) {}
 
           const seen = new Set(
             globalSessions
@@ -6558,7 +6858,7 @@ function setupProxy(app) {
                     }
                   }
                 }
-              } catch {}
+              } catch (_) {}
             }
           }
 
@@ -6619,14 +6919,14 @@ async function gracefulShutdown(options = {}) {
       for (const client of terminalInputWsServer.clients) {
         try {
           client.terminate();
-        } catch {
+        } catch (_) {
         }
       }
 
       await new Promise((resolve) => {
         terminalInputWsServer.close(() => resolve());
       });
-    } catch {
+    } catch (_) {
     } finally {
       terminalInputWsServer = null;
     }
@@ -6734,6 +7034,65 @@ async function main(options = {}) {
   expressApp = app;
   server = http.createServer(app);
 
+  const appendVaryHeader = (res, value) => {
+    const current = res.getHeader('Vary');
+    if (!current) {
+      res.setHeader('Vary', value);
+      return;
+    }
+    const values = String(current)
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (!values.includes(value)) {
+      values.push(value);
+      res.setHeader('Vary', values.join(', '));
+    }
+  };
+
+  const applyTrustedCorsHeaders = async (req, res, allowedMethods, allowCredentials = false) => {
+    const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    if (!originHeader) {
+      return false;
+    }
+
+    const allowed = await isRequestOriginAllowed(req);
+    if (!allowed) {
+      return false;
+    }
+
+    res.setHeader('Access-Control-Allow-Origin', originHeader);
+    appendVaryHeader(res, 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', allowedMethods);
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, X-Requested-With');
+    if (allowCredentials) {
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+
+    return true;
+  };
+
+  app.use('/health', async (req, res, next) => {
+    const corsApplied = await applyTrustedCorsHeaders(req, res, 'GET,OPTIONS');
+    if (req.method === 'OPTIONS') {
+      const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+      console.log(`[health] preflight origin=${originHeader || 'none'} allowed=${corsApplied ? 'yes' : 'no'}`);
+      return res.status(corsApplied ? 204 : 403).end();
+    }
+    return next();
+  });
+
+  app.use('/api', async (req, res, next) => {
+    if (req.path.startsWith('/auth/device') || req.path.startsWith('/auth/devices')) {
+      return next();
+    }
+    const corsApplied = await applyTrustedCorsHeaders(req, res, 'GET,POST,PATCH,DELETE,OPTIONS');
+    if (req.method === 'OPTIONS') {
+      return res.status(corsApplied ? 204 : 403).end();
+    }
+    return next();
+  });
+
   app.get('/health', (req, res) => {
     res.json({
       status: 'ok',
@@ -6781,6 +7140,7 @@ async function main(options = {}) {
       req.path.startsWith('/api/config/mcp') ||
       req.path.startsWith('/api/config/settings') ||
       req.path.startsWith('/api/config/skills') ||
+      req.path.startsWith('/api/auth') ||
       req.path.startsWith('/api/projects') ||
       req.path.startsWith('/api/fs') ||
       req.path.startsWith('/api/git') ||
@@ -6869,7 +7229,79 @@ async function main(options = {}) {
     }
   });
 
+  const isDevicePublicAuthPath = (req) => {
+    const normalizedPath = typeof req.path === 'string' ? req.path : '';
+    if (normalizedPath === '/auth/device/start' || normalizedPath === '/auth/device/token') {
+      return true;
+    }
+    if (normalizedPath === '/auth/device/start/' || normalizedPath === '/auth/device/token/') {
+      return true;
+    }
+    return false;
+  };
+
+  const isDevicesAdminPath = (req) => {
+    const normalizedPath = typeof req.path === 'string' ? req.path : '';
+    return normalizedPath.startsWith('/auth/devices');
+  };
+
+  const requireUiCookieAuth = (req, res, next) => {
+    uiAuthController.requireAuth(req, res, next);
+  };
+
+  const authDeviceCorsMiddleware = async (req, res, next) => {
+    const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    if (originHeader) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+    }
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+    return next();
+  };
+
+  const authDevicesCorsMiddleware = async (req, res, next) => {
+    const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    if (originHeader) {
+      const allowed = await isRequestOriginAllowed(req);
+      if (allowed) {
+        res.setHeader('Access-Control-Allow-Origin', originHeader);
+        res.setHeader('Vary', 'Origin');
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+      }
+    }
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+    return next();
+  };
+
+  app.use('/api/auth/device', authDeviceCorsMiddleware);
+  app.use('/api/auth/devices', authDevicesCorsMiddleware);
+
   app.use('/api', async (req, res, next) => {
+    if (isDevicePublicAuthPath(req)) {
+      return next();
+    }
+
+    if (isDevicesAdminPath(req)) {
+      return requireUiCookieAuth(req, res, next);
+    }
+
+    try {
+      const authenticatedDevice = await authenticateBearerDevice(req);
+      if (authenticatedDevice) {
+        req.openchamberDevice = authenticatedDevice;
+        return next();
+      }
+    } catch (error) {
+      console.warn('Bearer authentication failed:', error);
+    }
+
     try {
       const requestScope = tunnelAuthController.classifyRequestScope(req);
       if (requestScope === 'tunnel' || requestScope === 'unknown-public') {
@@ -6878,8 +7310,7 @@ async function main(options = {}) {
       await uiAuthController.requireAuth(req, res, next);
     } catch (err) {
       next(err);
-    }
-  });
+    }  });
 
   const parsePushSubscribeBody = (body) => {
     if (!body || typeof body !== 'object') return null;
@@ -6945,7 +7376,7 @@ async function main(options = {}) {
           // allow next sends to pick it up
           pushInitialized = false;
         }
-      } catch {
+      } catch (_) {
         // ignore
       }
     }
@@ -7412,7 +7843,7 @@ async function main(options = {}) {
       try {
         const content = await fs.promises.readFile(instanceFilePath, 'utf8');
         storedOptions = JSON.parse(content);
-      } catch {
+      } catch (_) {
         // Use defaults
       }
 
@@ -7517,7 +7948,7 @@ async function main(options = {}) {
         if (logFd !== null) {
           try {
             fs.closeSync(logFd);
-          } catch {
+          } catch (_) {
             // ignore
           }
         }
@@ -7850,7 +8281,7 @@ async function main(options = {}) {
     let targetUrl;
     try {
       targetUrl = new URL(buildOpenCodeUrl('/global/event', ''));
-    } catch {
+    } catch (_) {
       return res.status(503).json({ error: 'OpenCode service unavailable' });
     }
 
@@ -7980,7 +8411,7 @@ async function main(options = {}) {
       cleanup();
       try {
         res.end();
-      } catch {
+      } catch (_) {
         // ignore
       }
     }
@@ -7990,7 +8421,7 @@ async function main(options = {}) {
     let targetUrl;
     try {
       targetUrl = new URL(buildOpenCodeUrl('/event', ''));
-    } catch {
+    } catch (_) {
       return res.status(503).json({ error: 'OpenCode service unavailable' });
     }
 
@@ -8119,7 +8550,7 @@ async function main(options = {}) {
       cleanup();
       try {
         res.end();
-      } catch {
+      } catch (_) {
         // ignore
       }
     }
@@ -8929,7 +9360,7 @@ async function main(options = {}) {
           };
         })
         .filter(Boolean);
-    } catch {
+    } catch (_) {
       return null;
     }
   };
@@ -8979,7 +9410,7 @@ async function main(options = {}) {
     try {
       const profiles = getProfiles();
       return profiles.map((p) => ({ id: p.id, name: p.name }));
-    } catch {
+    } catch (_) {
       return [];
     }
   };
@@ -8994,7 +9425,7 @@ async function main(options = {}) {
       if (typeof sshKey === 'string' && sshKey.trim()) {
         return { sshKey: sshKey.trim() };
       }
-    } catch {
+    } catch (_) {
       // ignore
     }
     return null;
@@ -9562,7 +9993,7 @@ async function main(options = {}) {
         const primaryVerified = list.find((e) => e && e.primary && e.verified && typeof e.email === 'string');
         const anyVerified = list.find((e) => e && e.verified && typeof e.email === 'string');
         email = primaryVerified?.email || anyVerified?.email || null;
-      } catch {
+      } catch (_) {
         // ignore (scope might be missing)
       }
     }
@@ -9759,6 +10190,259 @@ async function main(options = {}) {
     }
   });
 
+  app.post('/api/auth/device/start', async (req, res) => {
+    try {
+      prunePendingDeviceGrants();
+
+      const requestedName = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+      const userAgent = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : '';
+      const now = Date.now();
+      const deviceCode = crypto.randomBytes(DEVICE_CODE_BYTES).toString('base64url');
+      const userCode = createUserCode();
+      const userCodeNormalized = normalizeUserCode(userCode);
+      const intervalSeconds = DEVICE_GRANT_DEFAULT_INTERVAL_SECONDS;
+      const expiresAt = now + DEVICE_GRANT_TTL_MS;
+
+      const origin = await resolveRequestOrigin(req);
+      const verificationPath = '/?settings=settings&section=openchamber&devices=1';
+      const verificationUri = origin ? `${origin}${verificationPath}` : verificationPath;
+      const verificationUriComplete = `${verificationUri}${verificationUri.includes('?') ? '&' : '?'}user_code=${encodeURIComponent(userCode)}`;
+
+      pendingDeviceGrantsByCode.set(deviceCode, {
+        deviceCode,
+        userCode,
+        userCodeNormalized,
+        createdAt: now,
+        expiresAt,
+        intervalSeconds,
+        status: 'pending',
+        requestedName: requestedName || null,
+        requestedUa: userAgent,
+        verificationUri,
+        verificationUriComplete,
+        nextPollAllowedAt: now,
+        lastPollAt: 0,
+      });
+      pendingDeviceGrantCodeByUserCode.set(userCodeNormalized, deviceCode);
+
+      return res.json({
+        device_code: deviceCode,
+        user_code: userCode,
+        verification_uri: verificationUri,
+        verification_uri_complete: verificationUriComplete,
+        expires_in: Math.floor((expiresAt - now) / 1000),
+        interval: intervalSeconds,
+      });
+    } catch (error) {
+      console.error('Failed to start device auth flow:', error);
+      return res.status(500).json({ error: 'server_error' });
+    }
+  });
+
+  app.post('/api/auth/device/token', async (req, res) => {
+    try {
+      prunePendingDeviceGrants();
+
+      const grantType = typeof req.body?.grant_type === 'string' ? req.body.grant_type.trim() : '';
+      const deviceCode = typeof req.body?.device_code === 'string' ? req.body.device_code.trim() : '';
+
+      if (!grantType || grantType !== 'urn:ietf:params:oauth:grant-type:device_code') {
+        return res.status(400).json({ error: 'unsupported_grant_type' });
+      }
+      if (!deviceCode) {
+        return res.status(400).json({ error: 'invalid_request' });
+      }
+
+      const grant = pendingDeviceGrantsByCode.get(deviceCode);
+      if (!grant) {
+        return res.status(400).json({ error: 'expired_token' });
+      }
+
+      const now = Date.now();
+      if (grant.expiresAt <= now) {
+        pendingDeviceGrantsByCode.delete(deviceCode);
+        pendingDeviceGrantCodeByUserCode.delete(grant.userCodeNormalized);
+        return res.status(400).json({ error: 'expired_token' });
+      }
+
+      if (grant.nextPollAllowedAt && now < grant.nextPollAllowedAt) {
+        const nextIntervalSeconds = (grant.intervalSeconds || DEVICE_GRANT_DEFAULT_INTERVAL_SECONDS) + 5;
+        grant.intervalSeconds = nextIntervalSeconds;
+        grant.nextPollAllowedAt = now + (nextIntervalSeconds * 1000);
+        pendingDeviceGrantsByCode.set(deviceCode, grant);
+        return res.status(400).json({ error: 'slow_down' });
+      }
+
+      grant.lastPollAt = now;
+      grant.nextPollAllowedAt = now + Math.max(DEVICE_POLL_MIN_INTERVAL_MS, (grant.intervalSeconds || DEVICE_GRANT_DEFAULT_INTERVAL_SECONDS) * 1000);
+
+      if (grant.status === 'denied') {
+        pendingDeviceGrantsByCode.delete(deviceCode);
+        pendingDeviceGrantCodeByUserCode.delete(grant.userCodeNormalized);
+        return res.status(400).json({ error: 'access_denied' });
+      }
+
+      if (grant.status !== 'approved' || !grant.approvedToken || !grant.approvedExpiresInSeconds) {
+        pendingDeviceGrantsByCode.set(deviceCode, grant);
+        return res.status(400).json({ error: 'authorization_pending' });
+      }
+
+      const accessToken = grant.approvedToken;
+      const expiresIn = grant.approvedExpiresInSeconds;
+      pendingDeviceGrantsByCode.delete(deviceCode);
+      pendingDeviceGrantCodeByUserCode.delete(grant.userCodeNormalized);
+
+      return res.json({
+        access_token: accessToken,
+        token_type: 'bearer',
+        expires_in: expiresIn,
+      });
+    } catch (error) {
+      console.error('Failed to exchange device auth token:', error);
+      return res.status(500).json({ error: 'server_error' });
+    }
+  });
+
+  app.get('/api/auth/devices', requireUiCookieAuth, async (_req, res) => {
+    try {
+      const devices = await readDeviceRecordsFromSettings();
+      return res.json({
+        devices: devices.map(toPublicDeviceRecord).filter(Boolean),
+      });
+    } catch (error) {
+      console.error('Failed to list devices:', error);
+      return res.status(500).json({ error: 'Failed to list devices' });
+    }
+  });
+
+  app.post('/api/auth/devices/approve', requireUiCookieAuth, async (req, res) => {
+    try {
+      prunePendingDeviceGrants();
+
+      const rawUserCode = typeof req.body?.user_code === 'string' ? req.body.user_code : '';
+      const normalizedUserCode = normalizeUserCode(rawUserCode);
+      if (!normalizedUserCode) {
+        return res.status(400).json({ ok: false, error: 'invalid_code' });
+      }
+
+      const deviceCode = pendingDeviceGrantCodeByUserCode.get(normalizedUserCode);
+      if (!deviceCode) {
+        return res.status(404).json({ ok: false, error: 'not_found' });
+      }
+
+      const grant = pendingDeviceGrantsByCode.get(deviceCode);
+      if (!grant) {
+        pendingDeviceGrantCodeByUserCode.delete(normalizedUserCode);
+        return res.status(404).json({ ok: false, error: 'not_found' });
+      }
+
+      const now = Date.now();
+      if (grant.expiresAt <= now) {
+        pendingDeviceGrantsByCode.delete(deviceCode);
+        pendingDeviceGrantCodeByUserCode.delete(normalizedUserCode);
+        return res.status(400).json({ ok: false, error: 'expired_token' });
+      }
+
+      if (grant.status === 'approved') {
+        return res.json({ ok: true });
+      }
+
+      const devices = await readDeviceRecordsFromSettings();
+      const token = crypto.randomBytes(DEVICE_TOKEN_BYTES).toString('base64url');
+      const tokenHash = hashDeviceToken(token);
+      const expiresAt = now + normalizedDeviceTokenTtlMs;
+      const expiresInSeconds = Math.floor((expiresAt - now) / 1000);
+
+      const nameFromBody = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+      const deviceName = nameFromBody || grant.requestedName || 'Device';
+      const userAgent = typeof grant.requestedUa === 'string' ? grant.requestedUa : '';
+
+      const record = {
+        id: crypto.randomUUID(),
+        name: deviceName,
+        createdAt: now,
+        lastUsedAt: null,
+        expiresAt,
+        userAgent,
+        platform: parseDevicePlatform(userAgent),
+        tokenHash,
+      };
+
+      await writeDeviceRecordsToSettings([record, ...devices]);
+
+      grant.status = 'approved';
+      grant.approvedDeviceId = record.id;
+      grant.approvedToken = token;
+      grant.approvedExpiresInSeconds = expiresInSeconds;
+      grant.nextPollAllowedAt = now;
+      pendingDeviceGrantsByCode.set(deviceCode, grant);
+
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error('Failed to approve device:', error);
+      return res.status(500).json({ ok: false, error: 'server_error' });
+    }
+  });
+
+  app.patch('/api/auth/devices/:id', requireUiCookieAuth, async (req, res) => {
+    try {
+      const deviceId = typeof req.params?.id === 'string' ? req.params.id.trim() : '';
+      const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+      if (!deviceId || !name) {
+        return res.status(400).json({ error: 'id and name are required' });
+      }
+
+      const devices = await readDeviceRecordsFromSettings();
+      let found = false;
+      const nextDevices = devices.map((entry) => {
+        if (entry.id !== deviceId) {
+          return entry;
+        }
+        found = true;
+        return {
+          ...entry,
+          name,
+        };
+      });
+
+      if (!found) {
+        return res.status(404).json({ error: 'Device not found' });
+      }
+
+      await writeDeviceRecordsToSettings(nextDevices);
+      const updated = nextDevices.find((entry) => entry.id === deviceId) || null;
+      return res.json({
+        ok: true,
+        device: toPublicDeviceRecord(updated),
+      });
+    } catch (error) {
+      console.error('Failed to update device:', error);
+      return res.status(500).json({ error: 'Failed to update device' });
+    }
+  });
+
+  app.delete('/api/auth/devices/:id', requireUiCookieAuth, async (req, res) => {
+    try {
+      const deviceId = typeof req.params?.id === 'string' ? req.params.id.trim() : '';
+      if (!deviceId) {
+        return res.status(400).json({ error: 'id is required' });
+      }
+
+      const devices = await readDeviceRecordsFromSettings();
+      const nextDevices = devices.filter((entry) => entry.id !== deviceId);
+      if (nextDevices.length === devices.length) {
+        return res.status(404).json({ error: 'Device not found' });
+      }
+
+      await writeDeviceRecordsToSettings(nextDevices);
+      deviceLastUsedTouchCache.delete(deviceId);
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error('Failed to revoke device:', error);
+      return res.status(500).json({ error: 'Failed to revoke device' });
+    }
+  });
+
   app.get('/api/github/me', async (_req, res) => {
     try {
       const { getOctokitOrNull, clearGitHubAuth } = await getGitHubLibraries();
@@ -9934,7 +10618,7 @@ async function main(options = {}) {
               : (counts.pending > 0 ? 'pending' : (total > 0 ? 'success' : 'unknown'));
             checks = { state, total, ...counts };
           }
-        } catch {
+        } catch (_) {
           // ignore and fall back
         }
 
@@ -9957,7 +10641,7 @@ async function main(options = {}) {
               ? 'failure'
               : (counts.pending > 0 ? 'pending' : (total > 0 ? 'success' : 'unknown'));
             checks = { state, total, ...counts };
-          } catch {
+          } catch (_) {
             checks = null;
           }
         }
@@ -9977,7 +10661,7 @@ async function main(options = {}) {
           const level = perm?.data?.permission;
           canMerge = level === 'admin' || level === 'maintain' || level === 'write';
         }
-      } catch {
+      } catch (_) {
         canMerge = false;
       }
 
@@ -10752,7 +11436,7 @@ async function main(options = {}) {
                   });
                   const jobs = Array.isArray(jobsResp?.data?.jobs) ? jobsResp.data.jobs : [];
                   parsedJobs.set(runId, jobs);
-                } catch {
+                } catch (_) {
                   parsedJobs.set(runId, []);
                 }
               }
@@ -10788,7 +11472,7 @@ async function main(options = {}) {
                     if (chunk.length < 50) {
                       break;
                     }
-                  } catch {
+                  } catch (_) {
                     break;
                   }
                 }
@@ -10893,7 +11577,7 @@ async function main(options = {}) {
             const state = counts.failure > 0 ? 'failure' : (counts.pending > 0 ? 'pending' : (total > 0 ? 'success' : 'unknown'));
             checks = { state, total, ...counts };
           }
-        } catch {
+        } catch (_) {
           // ignore and fall back
         }
         if (!checks) {
@@ -10909,7 +11593,7 @@ async function main(options = {}) {
             const total = counts.success + counts.failure + counts.pending;
             const state = counts.failure > 0 ? 'failure' : (counts.pending > 0 ? 'pending' : (total > 0 ? 'success' : 'unknown'));
             checks = { state, total, ...counts };
-          } catch {
+          } catch (_) {
             checks = null;
           }
         }
@@ -12187,7 +12871,7 @@ async function main(options = {}) {
         timedOut = true;
         try {
           child.kill('SIGKILL');
-        } catch {
+        } catch (_) {
           // ignore
         }
       }, COMMAND_TIMEOUT_MS);
@@ -12465,11 +13149,11 @@ async function main(options = {}) {
                 const fullPath = path.join(resolvedPath, name.trim());
                 ignoredPaths.add(fullPath);
               });
-            } catch {
+            } catch (_) {
               // git check-ignore fails if not a git repo, continue without filtering
             }
           }
-        } catch {
+        } catch (_) {
           // If git is not available, continue without gitignore filtering
         }
       }
@@ -12490,7 +13174,7 @@ async function main(options = {}) {
             try {
               const linkStats = await fsPromises.stat(entryPath);
               isDirectory = linkStats.isDirectory();
-            } catch {
+            } catch (_) {
               isDirectory = false;
             }
           }
@@ -12682,7 +13366,7 @@ async function main(options = {}) {
 
     try {
       socket.send(createTerminalInputWsControlFrame(payload), { binary: true });
-    } catch {
+    } catch (_) {
     }
   };
 
@@ -12708,7 +13392,7 @@ async function main(options = {}) {
 
       try {
         socket.ping();
-      } catch {
+      } catch (_) {
       }
     }, TERMINAL_INPUT_WS_HEARTBEAT_INTERVAL_MS);
 
@@ -12798,7 +13482,7 @@ async function main(options = {}) {
       try {
         session.ptyProcess.write(payload);
         session.lastActivity = Date.now();
-      } catch {
+      } catch (_) {
         sendTerminalInputWsControl(socket, { t: 'e', c: 'WRITE_FAIL', f: false });
       }
     });
@@ -12820,18 +13504,25 @@ async function main(options = {}) {
 
     const handleUpgrade = async () => {
       try {
-        if (uiAuthController?.enabled) {
-          // Must be awaited: this call performs async token verification.
-          const sessionToken = await uiAuthController?.ensureSessionToken?.(req, null);
-          if (!sessionToken) {
-            rejectWebSocketUpgrade(socket, 401, 'UI authentication required');
-            return;
-          }
+        const authenticatedDevice = await authenticateBearerDevice(req);
+        if (authenticatedDevice) {
+          req.openchamberDevice = authenticatedDevice;
+        }
 
-          const originAllowed = await isRequestOriginAllowed(req);
-          if (!originAllowed) {
-            rejectWebSocketUpgrade(socket, 403, 'Invalid origin');
-            return;
+        if (uiAuthController?.enabled) {
+          if (!authenticatedDevice) {
+            // Must be awaited: this call performs async token verification.
+            const sessionToken = await uiAuthController?.ensureSessionToken?.(req, null);
+            if (!sessionToken) {
+              rejectWebSocketUpgrade(socket, 401, 'UI authentication required');
+              return;
+            }
+
+            const originAllowed = await isRequestOriginAllowed(req);
+            if (!originAllowed) {
+              rejectWebSocketUpgrade(socket, 403, 'Invalid origin');
+              return;
+            }
           }
         }
 
@@ -12843,7 +13534,7 @@ async function main(options = {}) {
         terminalInputWsServer.handleUpgrade(req, socket, head, (ws) => {
           terminalInputWsServer.emit('connection', ws, req);
         });
-      } catch {
+      } catch (_) {
         rejectWebSocketUpgrade(socket, 500, 'Upgrade failed');
       }
     };
@@ -12879,7 +13570,7 @@ async function main(options = {}) {
 
       try {
         await fs.promises.access(cwd);
-      } catch {
+      } catch (_) {
         return res.status(400).json({ error: 'Invalid working directory' });
       }
 
@@ -13345,7 +14036,7 @@ async function main(options = {}) {
 
           recentPwaSessionsCache.set(cacheKey, { at: now, data: shortcuts });
           return shortcuts;
-        } catch {
+        } catch (_) {
           recentPwaSessionsCache.set(cacheKey, { at: now, data: [] });
           return [];
         }
@@ -13372,7 +14063,7 @@ async function main(options = {}) {
         try {
           const settings = await readSettingsFromDiskMigrated();
           storedName = normalizePwaAppName(settings?.pwaAppName, '');
-        } catch {
+        } catch (_) {
           storedName = '';
         }
 
@@ -13452,7 +14143,7 @@ async function main(options = {}) {
 
       try {
         process.send?.({ type: 'openchamber:ready', port: activePort });
-      } catch {
+      } catch (_) {
         // ignore
       }
 

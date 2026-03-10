@@ -16,7 +16,7 @@ import { handleTodoUpdatedEvent } from '@/stores/useTodoStore';
 import { useMcpStore } from '@/stores/useMcpStore';
 import { useContextStore } from '@/stores/contextStore';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
-import { isDesktopLocalOriginActive } from '@/lib/desktop';
+import { isDesktopLocalOriginActive, runHapticFeedback } from '@/lib/desktop';
 import { triggerSessionStatusPoll } from '@/hooks/useServerSessionStatus';
 import { PermissionToastActions } from '@/components/chat/PermissionToastActions';
 
@@ -268,6 +268,8 @@ export const useEventStream = (options?: { enabled?: boolean }) => {
   } = useSessionStore();
 
   const { checkConnection } = useConfigStore();
+  const nativeNotificationsEnabled = useUIStore((state) => state.nativeNotificationsEnabled);
+  const mobileHapticsEnabled = useUIStore((state) => state.mobileHapticsEnabled);
   const fallbackDirectory = useDirectoryStore((state) => state.currentDirectory);
 
   const activeSessionDirectory = React.useMemo(() => {
@@ -1919,6 +1921,15 @@ export const useEventStream = (options?: { enabled?: boolean }) => {
         }
 
         dispatchRuntimeNotification({ title, body, tag, requireHidden });
+        if (!nativeNotificationsEnabled) {
+          break;
+        }
+
+        const runtimeAPIs = getRegisteredRuntimeAPIs();
+        if (runtimeAPIs?.notifications && title) {
+          void runtimeAPIs.notifications.notifyAgentCompletion({ title, body, tag });
+          void runHapticFeedback('success', mobileHapticsEnabled);
+        }
 
         break;
       }
@@ -1937,6 +1948,8 @@ export const useEventStream = (options?: { enabled?: boolean }) => {
     }
   }, [
     currentSessionId,
+    nativeNotificationsEnabled,
+    mobileHapticsEnabled,
     addStreamingPart,
     completeStreamingMessage,
     updateMessageInfo,
