@@ -52,3 +52,5 @@ packages/intellij/
 
 # OS
 Thumbs.db
+
+context_portal/

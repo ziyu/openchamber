@@ -54,6 +54,7 @@
     "desktop:ios:dev": "bun run --cwd packages/desktop tauri:ios:dev",
     "desktop:ios:build": "bun run --cwd packages/desktop tauri:ios:build",
     "mobile:android:build": "bun run --cwd packages/desktop fastlane:android:build",
+    "mobile:android:build:signed": "cross-env ANDROID_KEYSTORE_PATH=\"./android-debug.keystore\" ANDROID_KEY_ALIAS=\"androiddebugkey\" ANDROID_KEYSTORE_PASSWORD=\"password\" ANDROID_KEY_PASSWORD=\"password\" bun run --cwd packages/desktop fastlane:android:build",
     "mobile:android:play-internal": "bun run --cwd packages/desktop fastlane:android:play-internal",
     "mobile:ios:build": "bun run --cwd packages/desktop fastlane:ios:build",
     "mobile:ios:testflight": "bun run --cwd packages/desktop fastlane:ios:testflight",
