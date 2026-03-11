@@ -2,7 +2,10 @@ import React from 'react';
 import { Header } from './Header';
 import { BottomTerminalDock } from './BottomTerminalDock';
 import { Sidebar } from './Sidebar';
+import { NavRail } from './NavRail';
 import { RightSidebar } from './RightSidebar';
+import { RightSidebarTabs } from './RightSidebarTabs';
+import { ContextPanel } from './ContextPanel';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { CommandPalette } from '../ui/CommandPalette';
 import { HelpDialog } from '../ui/HelpDialog';
@@ -15,10 +18,30 @@ import { MultiRunLauncher } from '@/components/multirun';
 import { useUIStore } from '@/stores/useUIStore';
 import { useUpdateStore } from '@/stores/useUpdateStore';
 import { useDeviceInfo } from '@/lib/device';
+import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useEdgeSwipe } from '@/hooks/useEdgeSwipe';
 import { cn } from '@/lib/utils';
 
 import { ChatView, PlanView, GitView, DiffView, TerminalView, FilesView, SettingsView, SettingsWindow } from '@/components/views';
+
+const normalizeDirectoryKey = (value: string): string => {
+    if (!value) return '';
+
+    const raw = value.replace(/\\/g, '/');
+    const hadUncPrefix = raw.startsWith('//');
+    let normalized = raw.replace(/\/+$/g, '');
+    normalized = normalized.replace(/\/+/g, '/');
+
+    if (hadUncPrefix && !normalized.startsWith('//')) {
+        normalized = `/${normalized}`;
+    }
+
+    if (normalized === '') {
+        return raw.startsWith('/') ? '/' : '';
+    }
+
+    return normalized;
+};
 
 export const MainLayout: React.FC = () => {
     const RIGHT_SIDEBAR_AUTO_CLOSE_WIDTH = 1140;
@@ -44,18 +67,59 @@ export const MainLayout: React.FC = () => {
     const { isMobile, isTablet } = useDeviceInfo();
     const isTabletLayout = isTablet;
     const isPhoneLayout = isMobile && !isTabletLayout;
+    const effectiveDirectory = useEffectiveDirectory() ?? '';
+    const directoryKey = React.useMemo(() => normalizeDirectoryKey(effectiveDirectory), [effectiveDirectory]);
+    const isContextPanelOpen = useUIStore((state) => {
+        if (!directoryKey) {
+            return false;
+        }
+        const panelState = state.contextPanelByDirectory[directoryKey];
+        const tabs = panelState?.tabs ?? [];
+        const activeTab = tabs.find((tab) => tab.id === panelState?.activeTabId) ?? tabs[tabs.length - 1];
+        return Boolean(panelState?.isOpen && activeTab);
+    });
+    const setSidebarOpen = useUIStore((state) => state.setSidebarOpen);
     const rightSidebarAutoClosedRef = React.useRef(false);
     const bottomTerminalAutoClosedRef = React.useRef(false);
+    const leftSidebarAutoClosedByContextRef = React.useRef(false);
 
     useEdgeSwipe({ enabled: true });
 
-    // Trigger update check 3 seconds after mount (for both mobile and desktop)
+    // Auto-close left sidebar when context panel opens, restore when it closes
+    React.useEffect(() => {
+        if (isContextPanelOpen) {
+            const currentlyOpen = useUIStore.getState().isSidebarOpen;
+            if (currentlyOpen) {
+                setSidebarOpen(false);
+                leftSidebarAutoClosedByContextRef.current = true;
+            }
+            return;
+        }
+
+        if (leftSidebarAutoClosedByContextRef.current) {
+            setSidebarOpen(true);
+            leftSidebarAutoClosedByContextRef.current = false;
+        }
+    }, [isContextPanelOpen, setSidebarOpen]);
+
+    // Trigger initial update check shortly after mount, then every hour.
     const checkForUpdates = useUpdateStore((state) => state.checkForUpdates);
     React.useEffect(() => {
-        const timer = setTimeout(() => {
+        const initialDelayMs = 3000;
+        const periodicIntervalMs = 60 * 60 * 1000;
+
+        const timer = window.setTimeout(() => {
             checkForUpdates();
-        }, 3000);
-        return () => clearTimeout(timer);
+        }, initialDelayMs);
+
+        const interval = window.setInterval(() => {
+            checkForUpdates();
+        }, periodicIntervalMs);
+
+        return () => {
+            window.clearTimeout(timer);
+            window.clearInterval(interval);
+        };
     }, [checkForUpdates]);
 
     React.useEffect(() => {
@@ -608,28 +672,34 @@ export const MainLayout: React.FC = () => {
                         <div className={cn('absolute inset-0 flex flex-col', isMultiRunLauncherOpen && 'invisible')}>
                             <Header />
                             <div className="flex flex-1 overflow-hidden">
+                                <NavRail />
+                                <div className="flex flex-1 min-w-0 overflow-hidden border-t border-l border-border/50 rounded-tl-xl">
                                 <Sidebar isOpen={isSidebarOpen} isMobile={isMobile}>
                                     <SessionSidebar />
                                 </Sidebar>
                                 <div className="flex flex-1 min-w-0 flex-col overflow-hidden">
                                     <div className="flex flex-1 min-h-0 overflow-hidden">
-                                        <main className="flex-1 overflow-hidden bg-background relative">
-                                            <div className={cn('absolute inset-0', !isChatActive && 'invisible')}>
-                                                <ErrorBoundary><ChatView /></ErrorBoundary>
-                                            </div>
-                                            {secondaryView && (
-                                                <div className="absolute inset-0">
-                                                    <ErrorBoundary>{secondaryView}</ErrorBoundary>
+                                        <div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
+                                            <main className="flex-1 overflow-hidden bg-background relative">
+                                                <div className={cn('absolute inset-0', !isChatActive && 'invisible')}>
+                                                    <ErrorBoundary><ChatView /></ErrorBoundary>
                                                 </div>
-                                            )}
-                                        </main>
+                                                {secondaryView && (
+                                                    <div className="absolute inset-0">
+                                                        <ErrorBoundary>{secondaryView}</ErrorBoundary>
+                                                    </div>
+                                                )}
+                                            </main>
+                                            <ErrorBoundary><ContextPanel /></ErrorBoundary>
+                                        </div>
                                         <RightSidebar isOpen={isRightSidebarOpen}>
-                                            <ErrorBoundary><GitView /></ErrorBoundary>
+                                            <ErrorBoundary><RightSidebarTabs /></ErrorBoundary>
                                         </RightSidebar>
                                     </div>
                                     <BottomTerminalDock isOpen={isBottomTerminalOpen} isMobile={isMobile}>
                                         <ErrorBoundary><TerminalView /></ErrorBoundary>
                                     </BottomTerminalDock>
+                                </div>
                                 </div>
                             </div>
                         </div>

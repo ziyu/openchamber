@@ -155,7 +155,10 @@ const truncateTabLabel = (value: string, maxChars: number): string => {
   return `${value.slice(0, maxChars - 3)}...`;
 };
 
-export const ContextPanel: React.FC = () => {
+const isEmbeddedFrame = typeof window !== 'undefined' && window.self !== window.top;
+
+const ContextPanelInner: React.FC = () => {
+
   const effectiveDirectory = useEffectiveDirectory() ?? '';
   const directoryKey = React.useMemo(() => normalizeDirectoryKey(effectiveDirectory), [effectiveDirectory]);
 
@@ -535,6 +538,11 @@ export const ContextPanel: React.FC = () => {
           </div>
         ) : null}
         {chatTabs.map((tab) => {
+          // Only render the active chat iframe to avoid loading multiple full React apps
+          if (activeChatTabID !== tab.id) {
+            return null;
+          }
+
           const sessionID = getSessionIDFromDedupeKey(tab.dedupeKey);
           if (!sessionID) {
             return null;
@@ -573,3 +581,6 @@ export const ContextPanel: React.FC = () => {
     </aside>
   );
 };
+
+// Prevent recursive iframe loading: if we're inside an iframe, don't render the panel
+export const ContextPanel: React.FC = isEmbeddedFrame ? () => null : ContextPanelInner;

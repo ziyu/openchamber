@@ -2,6 +2,7 @@ import React from 'react';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { VSCodeLayout } from '@/components/layout/VSCodeLayout';
 import { AgentManagerView } from '@/components/views/agent-manager';
+import { ChatView } from '@/components/views';
 import { FireworksProvider } from '@/contexts/FireworksContext';
 import { Toaster } from '@/components/ui/sonner';
 import { Button } from '@/components/ui/button';
@@ -21,8 +22,12 @@ import { useMenuActions } from '@/hooks/useMenuActions';
 import { useSessionStatusBootstrap } from '@/hooks/useSessionStatusBootstrap';
 import { useServerSessionStatus } from '@/hooks/useServerSessionStatus';
 import { useSessionAutoCleanup } from '@/hooks/useSessionAutoCleanup';
+import { useQueuedMessageAutoSend } from '@/hooks/useQueuedMessageAutoSend';
 import { useRouter } from '@/hooks/useRouter';
 import { usePushVisibilityBeacon } from '@/hooks/usePushVisibilityBeacon';
+import { usePwaManifestSync } from '@/hooks/usePwaManifestSync';
+import { usePwaInstallPrompt } from '@/hooks/usePwaInstallPrompt';
+import { useWindowTitle } from '@/hooks/useWindowTitle';
 import { GitPollingProvider } from '@/hooks/useGitPolling';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { hasModifier } from '@/lib/utils';
@@ -58,10 +63,50 @@ type AppProps = {
   apis: RuntimeAPIs;
 };
 
+type EmbeddedSessionChatConfig = {
+  sessionId: string;
+  directory: string | null;
+};
+
+type EmbeddedVisibilityPayload = {
+  visible?: unknown;
+};
+
+const readEmbeddedSessionChatConfig = (): EmbeddedSessionChatConfig | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('ocPanel') !== 'session-chat') {
+    return null;
+  }
+
+  const sessionIdRaw = params.get('sessionId');
+  const sessionId = typeof sessionIdRaw === 'string' ? sessionIdRaw.trim() : '';
+  if (!sessionId) {
+    return null;
+  }
+
+  const directoryRaw = params.get('directory');
+  const directory = typeof directoryRaw === 'string' && directoryRaw.trim().length > 0
+    ? directoryRaw.trim()
+    : null;
+
+  return {
+    sessionId,
+    directory,
+  };
+};
+
 function App({ apis }: AppProps) {
   const { initializeApp, isInitialized, isConnected } = useConfigStore();
   const { error, clearError, loadSessions } = useSessionStore();
+  const currentSessionId = useSessionStore((state) => state.currentSessionId);
+  const sessions = useSessionStore((state) => state.sessions);
+  const setCurrentSession = useSessionStore((state) => state.setCurrentSession);
   const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
+  const setDirectory = useDirectoryStore((state) => state.setDirectory);
   const isSwitchingDirectory = useDirectoryStore((state) => state.isSwitchingDirectory);
   const [showMemoryDebug, setShowMemoryDebug] = React.useState(false);
   const [connectionCheckCompleted, setConnectionCheckCompleted] = React.useState<boolean>(() => apis.runtime.isVSCode);
@@ -79,6 +124,9 @@ function App({ apis }: AppProps) {
   const biometricLockEnabled = useUIStore((state) => state.biometricLockEnabled);
   const setBiometricLockEnabled = useUIStore((state) => state.setBiometricLockEnabled);
   const appReadyDispatchedRef = React.useRef(false);
+  const [isEmbeddedVisible, setIsEmbeddedVisible] = React.useState(true);
+  const embeddedSessionChat = React.useMemo<EmbeddedSessionChatConfig | null>(() => readEmbeddedSessionChatConfig(), []);
+  const embeddedBackgroundWorkEnabled = !embeddedSessionChat || isEmbeddedVisible;
   const [biometricRequired, setBiometricRequired] = React.useState(false);
   const [biometricBusy, setBiometricBusy] = React.useState(false);
 
@@ -96,8 +144,12 @@ function App({ apis }: AppProps) {
   }, [apis]);
 
   React.useEffect(() => {
+    if (embeddedSessionChat) {
+      return;
+    }
+
     void refreshGitHubAuthStatus(apis.github, { force: true });
-  }, [apis.github, refreshGitHubAuthStatus]);
+  }, [apis.github, embeddedSessionChat, refreshGitHubAuthStatus]);
 
   React.useEffect(() => {
     if (typeof document === 'undefined') {
@@ -202,6 +254,99 @@ function App({ apis }: AppProps) {
     syncDirectoryAndSessions();
   }, [currentDirectory, isSwitchingDirectory, loadSessions, isConnected, isVSCodeRuntime]);
 
+  // Embedded session chat: listen for visibility messages from parent frame
+  React.useEffect(() => {
+    if (!embeddedSessionChat || typeof window === 'undefined') {
+      return;
+    }
+
+    const applyVisibility = (payload?: EmbeddedVisibilityPayload) => {
+      const nextVisible = payload?.visible === true;
+      setIsEmbeddedVisible(nextVisible);
+    };
+
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) {
+        return;
+      }
+
+      const data = event.data as { type?: unknown; payload?: EmbeddedVisibilityPayload };
+      if (data?.type !== 'openchamber:embedded-visibility') {
+        return;
+      }
+
+      applyVisibility(data.payload);
+    };
+
+    const scopedWindow = window as unknown as {
+      __openchamberSetEmbeddedVisibility?: (payload?: EmbeddedVisibilityPayload) => void;
+    };
+
+    scopedWindow.__openchamberSetEmbeddedVisibility = applyVisibility;
+    window.addEventListener('message', handleMessage);
+
+    return () => {
+      window.removeEventListener('message', handleMessage);
+      if (scopedWindow.__openchamberSetEmbeddedVisibility === applyVisibility) {
+        delete scopedWindow.__openchamberSetEmbeddedVisibility;
+      }
+    };
+  }, [embeddedSessionChat]);
+
+  // Embedded session chat: sync directory from URL parameter
+  React.useEffect(() => {
+    if (!embeddedSessionChat?.directory || isVSCodeRuntime) {
+      return;
+    }
+
+    if (currentDirectory === embeddedSessionChat.directory) {
+      return;
+    }
+
+    setDirectory(embeddedSessionChat.directory, { showOverlay: false });
+  }, [currentDirectory, embeddedSessionChat, isVSCodeRuntime, setDirectory]);
+
+  // Embedded session chat: sync session from URL parameter
+  React.useEffect(() => {
+    if (!embeddedSessionChat || isVSCodeRuntime) {
+      return;
+    }
+
+    if (currentSessionId === embeddedSessionChat.sessionId) {
+      return;
+    }
+
+    if (!sessions.some((session) => session.id === embeddedSessionChat.sessionId)) {
+      return;
+    }
+
+    void setCurrentSession(embeddedSessionChat.sessionId);
+  }, [currentSessionId, embeddedSessionChat, isVSCodeRuntime, sessions, setCurrentSession]);
+
+  // Embedded session chat: rehydrate UI store from localStorage changes
+  React.useEffect(() => {
+    if (!embeddedSessionChat || typeof window === 'undefined') {
+      return;
+    }
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.storageArea !== window.localStorage) {
+        return;
+      }
+
+      if (event.key !== 'ui-store') {
+        return;
+      }
+
+      void useUIStore.persist.rehydrate();
+    };
+
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, [embeddedSessionChat]);
+
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
     if (!isInitialized || isSwitchingDirectory) return;
@@ -211,13 +356,13 @@ function App({ apis }: AppProps) {
     window.dispatchEvent(new Event('openchamber:app-ready'));
   }, [isInitialized, isSwitchingDirectory]);
 
-  useEventStream();
+  useEventStream({ enabled: embeddedBackgroundWorkEnabled });
 
   // Server-authoritative session status polling
   // Replaces SSE-dependent status updates with reliable HTTP polling
-  useServerSessionStatus();
+  useServerSessionStatus({ enabled: embeddedBackgroundWorkEnabled });
 
-  usePushVisibilityBeacon();
+  usePushVisibilityBeacon({ enabled: embeddedBackgroundWorkEnabled });
 
   useRouter();
 
@@ -244,10 +389,19 @@ function App({ apis }: AppProps) {
 
 
 
-  useSessionStatusBootstrap();
-  useSessionAutoCleanup();
+  useSessionStatusBootstrap({ enabled: embeddedBackgroundWorkEnabled });
+  useSessionAutoCleanup({ enabled: embeddedBackgroundWorkEnabled });
+  useQueuedMessageAutoSend({ enabled: embeddedBackgroundWorkEnabled });
+
+  usePwaManifestSync();
+  usePwaInstallPrompt();
+  useWindowTitle();
 
   React.useEffect(() => {
+    if (embeddedSessionChat) {
+      return;
+    }
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (hasModifier(e) && e.shiftKey && e.key === 'D') {
         e.preventDefault();
@@ -257,16 +411,24 @@ function App({ apis }: AppProps) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [embeddedSessionChat]);
 
   React.useEffect(() => {
+    if (embeddedSessionChat) {
+      return;
+    }
+
     if (error) {
 
       setTimeout(() => clearError(), 5000);
     }
-  }, [error, clearError]);
+  }, [clearError, embeddedSessionChat, error]);
 
   React.useEffect(() => {
+    if (embeddedSessionChat) {
+      return;
+    }
+
     if (!isDesktopShell() || !isDesktopLocalOriginActive()) {
       return;
     }
@@ -293,7 +455,7 @@ function App({ apis }: AppProps) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [embeddedSessionChat]);
 
   const handleCliAvailable = React.useCallback(() => {
     setShowCliOnboarding(false);
@@ -447,6 +609,21 @@ function App({ apis }: AppProps) {
         <div className="h-full text-foreground bg-transparent">
           <OnboardingScreen onCliAvailable={handleCliAvailable} />
         </div>
+      </ErrorBoundary>
+    );
+  }
+
+  if (embeddedSessionChat) {
+    return (
+      <ErrorBoundary>
+        <RuntimeAPIProvider apis={apis}>
+          <TooltipProvider delayDuration={700} skipDelayDuration={150}>
+            <div className="h-full text-foreground bg-background">
+              <ChatView />
+              <Toaster />
+            </div>
+          </TooltipProvider>
+        </RuntimeAPIProvider>
       </ErrorBoundary>
     );
   }
